@@ -165,7 +165,27 @@ with st.sidebar:
         st.markdown(f"**Qdrant:** {qdrant_mode}")
         st.markdown(f"**LangChain:** {'✅ Active' if key_status['LANGCHAIN_API_KEY'] else '⚪ Optional'}")
 
+    with st.expander("⚙️ Configure / Override API Keys"):
+        st.caption("If not set in Streamlit Secrets, enter your keys below:")
+        input_gemini = st.text_input("Gemini API Key", type="password", key="ui_gemini_key", value=st.session_state.get("GEMINI_API_KEY", ""))
+        input_tavily = st.text_input("Tavily API Key", type="password", key="ui_tavily_key", value=st.session_state.get("TAVILY_API_KEY", ""))
+        input_qdrant_url = st.text_input("Qdrant URL (Optional)", key="ui_qdrant_url", value=st.session_state.get("QDRANT_URL", ""))
+        input_qdrant_key = st.text_input("Qdrant API Key (Optional)", type="password", key="ui_qdrant_key", value=st.session_state.get("QDRANT_API_KEY", ""))
+        
+        if st.button("Save & Refresh Keys", use_container_width=True):
+            if input_gemini.strip(): st.session_state["GEMINI_API_KEY"] = input_gemini.strip()
+            if input_tavily.strip(): st.session_state["TAVILY_API_KEY"] = input_tavily.strip()
+            if input_qdrant_url.strip(): st.session_state["QDRANT_URL"] = input_qdrant_url.strip()
+            if input_qdrant_key.strip(): st.session_state["QDRANT_API_KEY"] = input_qdrant_key.strip()
+            
+            # Re-initialize graph and evaluator with updated keys
+            st.session_state.crag_graph = CRAGGraph(st.session_state.retriever)
+            st.session_state.evaluator = RAGASEvaluator()
+            st.success("API keys updated!")
+            st.rerun()
+
     st.divider()
+
 
     # --- Section 2: Document Ingestion & OCR ---
     st.subheader("📁 Document Ingestion & OCR")
