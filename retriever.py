@@ -143,11 +143,21 @@ class HybridRetriever:
                 logger.warning(f"FlashRank initialization error: {e}. Will fallback to score ordering.")
                 self.flashrank_reranker = None
 
-    def get_embedding(self, text: str) -> List[float]:
-        """Generates embedding vector for input text via Gemini API with deterministic fallback."""
-        if self.genai_client and config.GEMINI_API_KEY:
+    def _get_genai_client(self) -> Optional[genai.Client]:
+        """Dynamically retrieves GenAI client using active GEMINI_API_KEY."""
+        if genai is not None and config.GEMINI_API_KEY:
             try:
-                response = self.genai_client.models.embed_content(
+                return genai.Client(api_key=config.GEMINI_API_KEY)
+            except Exception as e:
+                logger.warning(f"GenAI client init error: {e}")
+        return None
+
+    def get_embedding(self, text: str) -> List[float]:
+        """Generates embedding vector for input text via Gemini API text-embedding-004."""
+        client = self._get_genai_client()
+        if client:
+            try:
+                response = client.models.embed_content(
                     model=config.EMBEDDING_MODEL,
                     contents=text
                 )
@@ -163,6 +173,7 @@ class HybridRetriever:
         vec = np.random.randn(config.EMBEDDING_DIM)
         norm = np.linalg.norm(vec)
         return (vec / norm).tolist()
+
 
     def build_index(self, chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
         """

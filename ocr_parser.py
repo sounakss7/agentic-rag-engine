@@ -198,14 +198,40 @@ class DocumentIngestor:
             }]
 
     def _ocr_image(self, image: Image.Image) -> str:
-        """Helper to run PyTesseract safely on a PIL Image."""
-        if pytesseract is None:
-            return "[PyTesseract module not installed]"
+        """Helper to run PyTesseract with fallback to Gemini 2.5 Flash Vision OCR."""
+        if pytesseract is not None:
+            try:
+                text = pytesseract.image_to_string(image)
+                if text.strip():
+                    return text
+            except Exception as e:
+                logger.warning(f"Tesseract OCR execution warning: {e}")
+
+        # Gemini 2.5 Flash Multimodal Vision OCR Fallback
         try:
-            return pytesseract.image_to_string(image)
+            from google import genai
+            from google.genai import types
+            from config import config
+            if genai is not None and config.GEMINI_API_KEY:
+                client = genai.Client(api_key=config.GEMINI_API_KEY)
+                img_byte_arr = io.BytesIO()
+                image.save(img_byte_arr, format='JPEG')
+                img_bytes = img_byte_arr.getvalue()
+
+                res = client.models.generate_content(
+                    model=config.LLM_MODEL,
+                    contents=[
+                        types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"),
+                        "Extract all text from this document image completely and accurately. Do not summarize."
+                    ]
+                )
+                if res and res.text:
+                    return res.text.strip()
         except Exception as e:
-            logger.warning(f"Tesseract OCR execution warning: {e}")
-            return ""
+            logger.warning(f"Gemini Vision OCR fallback warning: {e}")
+
+        return ""
+
 
     def _parse_text(self, file_bytes: bytes, filename: str) -> List[Dict[str, Any]]:
         """Parses plain text files."""

@@ -176,6 +176,22 @@ with st.sidebar:
         help="Supports native PDF, scanned PDF OCR, images, and text files."
     )
 
+    # Auto-index when files are uploaded or changed
+    current_file_names = [f.name for f in uploaded_files] if uploaded_files else []
+    if uploaded_files and st.session_state.get("last_uploaded_files") != current_file_names:
+        st.session_state["last_uploaded_files"] = current_file_names
+        all_chunks = []
+        with st.spinner("Auto-parsing & indexing uploaded documents..."):
+            for uf in uploaded_files:
+                file_bytes = uf.read()
+                filename = uf.name
+                chunks, summary = st.session_state.ingestor.process_file(file_bytes, filename)
+                all_chunks.extend(chunks)
+            st.session_state.retriever.build_index(all_chunks)
+            st.session_state.indexed_chunks = all_chunks
+            st.session_state.crag_graph = CRAGGraph(st.session_state.retriever)
+        st.toast(f"Auto-indexed {len(all_chunks)} chunks from {len(uploaded_files)} file(s)!", icon="✅")
+
     if st.button("🚀 Build / Refresh Vector Index", use_container_width=True, type="primary"):
         if not uploaded_files:
             st.warning("Please upload at least one document to index.")
@@ -197,6 +213,7 @@ with st.sidebar:
             progress_bar.progress(90, text="Indexing chunks into Qdrant & BM25 Sparse Store...")
             st.session_state.retriever.build_index(all_chunks)
             st.session_state.indexed_chunks = all_chunks
+            st.session_state["last_uploaded_files"] = current_file_names
             
             # Refresh CRAG Graph reference
             st.session_state.crag_graph = CRAGGraph(st.session_state.retriever)
@@ -207,6 +224,7 @@ with st.sidebar:
             st.success(f"Successfully indexed {len(all_chunks)} total chunks into Hybrid Engine!")
 
     st.divider()
+
 
     # --- Section 3: Collection Statistics & Controls ---
     st.subheader("📊 Database Stats")
