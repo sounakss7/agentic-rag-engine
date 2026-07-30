@@ -37,7 +37,7 @@ class RAGASEvaluator:
     2. Context Precision: Evaluates signal-to-noise ratio of retrieved context chunks.
     """
 
-    def _get_client() -> Optional[genai.Client]:
+    def _get_client(self) -> Optional[genai.Client]:
         """Dynamically retrieves GenAI client using active GEMINI_API_KEY."""
         if genai is not None and config.GEMINI_API_KEY:
             try:
@@ -45,6 +45,7 @@ class RAGASEvaluator:
             except Exception as e:
                 logger.warning(f"RAGASEvaluator GenAI client init error: {e}")
         return None
+
 
     def evaluate_response(
         self,
