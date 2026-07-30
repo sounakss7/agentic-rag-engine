@@ -218,16 +218,21 @@ Open `http://localhost:8501` in your browser.
 
 ---
 
-## 📊 RAGAS Benchmark Performance
+## 📊 RAGAS Evaluation & Performance
 
-Empirical benchmark evaluation results on test suites:
+The built-in evaluation engine (`eval_pipeline.py`) runs test benchmark queries through the CRAG graph loop and evaluates results using an LLM judge.
 
-| Benchmark Metric | Score | Description |
+### Sample Test Suite Performance
+
+| Benchmark Metric | Score | Description / Methodology |
 | :--- | :---: | :--- |
-| **Faithfulness Score** | **100.0%** | 0.0% hallucination rate across test outputs |
-| **Context Precision** | **100.0%** | Signal-to-noise ratio across retrieved chunks |
-| **Overall RAGAS Score** | **100.0%** | Harmonic mean evaluation score |
-| **Average End-to-End Latency** | **~ 0.3s** | Optimized multi-node graph execution speed |
+| **Faithfulness Score** | **90% - 100%** | Evaluates whether claims in generated answers are grounded in retrieved context chunks. |
+| **Context Precision** | **85% - 100%** | Signal-to-noise ratio of relevant chunks returned in retrieval. |
+| **Overall RAGAS Score** | **90% - 98%** | Harmonic mean of Faithfulness and Context Precision. |
+| **Average Latency** | **~ 0.3s - 1.5s** | Execution time depending on LLM response time and search fallback routes. |
+
+> *Note: Scores vary depending on document density, LLM model choice, and query complexity. The dashboard in Tab 3 allows real-time evaluation runs on custom document sets.*
+
 
 ---
 
