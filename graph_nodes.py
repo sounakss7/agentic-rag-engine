@@ -3,10 +3,17 @@ import logging
 from typing import TypedDict, List, Dict, Any, Optional
 from pydantic import BaseModel, Field
 
+from config import config, register_degraded_component, get_degraded_components, is_degraded_mode
+from retriever import HybridRetriever
+
+logger = logging.getLogger("CRAGNodes")
+logger.setLevel(logging.INFO)
+
 try:
     from google import genai
     from google.genai import types
 except ImportError:
+    register_degraded_component("Gemini GenAI (stub)")
     genai = None
     types = None
 
@@ -14,6 +21,7 @@ except ImportError:
 try:
     from tavily import TavilyClient
 except ImportError:
+    register_degraded_component("TavilyClient (stub)")
     class TavilyClient:
         def __init__(self, api_key: str):
             self.api_key = api_key
@@ -24,6 +32,7 @@ except ImportError:
 try:
     from langgraph.graph import StateGraph, START, END
 except ImportError:
+    register_degraded_component("LangGraph (stub)")
     START = "START"
     END = "END"
     class StateGraph:
@@ -64,12 +73,6 @@ except ImportError:
                     break
             return state
 
-
-from config import config
-from retriever import HybridRetriever
-
-logger = logging.getLogger("CRAGNodes")
-logger.setLevel(logging.INFO)
 
 
 # Pydantic Schemas for Structured Output

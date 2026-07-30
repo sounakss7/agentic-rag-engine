@@ -28,6 +28,8 @@ except ImportError:
             return chunks
 
 
+from config import register_degraded_component
+
 # Setup Logging
 logger = logging.getLogger("OCRParser")
 logger.setLevel(logging.INFO)
@@ -46,12 +48,15 @@ except ImportError:
 try:
     import pytesseract
 except ImportError:
+    register_degraded_component("PyTesseract (stub)")
     pytesseract = None
 
 try:
     from pdf2image import convert_from_bytes
 except ImportError:
+    register_degraded_component("pdf2image (stub)")
     convert_from_bytes = None
+
 
 
 class DocumentIngestor:

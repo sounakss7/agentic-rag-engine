@@ -3,11 +3,12 @@ import streamlit as st
 import pandas as pd
 
 # Internal Module Imports
-from config import config
+from config import config, is_degraded_mode, get_degraded_components
 from ocr_parser import DocumentIngestor
 from retriever import HybridRetriever
 from graph_nodes import CRAGGraph
 from eval_pipeline import RAGASEvaluator
+
 
 # ==================== PAGE CONFIGURATION ====================
 st.set_page_config(
@@ -156,6 +157,9 @@ with st.sidebar:
     st.subheader("🔑 API Key Status")
     key_status = config.key_status()
 
+    if is_degraded_mode():
+        st.warning(f"⚠️ **Running in degraded mode**: {', '.join(get_degraded_components())}")
+
     col_k1, col_k2 = st.columns(2)
     with col_k1:
         st.markdown(f"**Gemini:** {'✅ Active' if key_status['GEMINI_API_KEY'] else '⚠️ Missing'}")
@@ -164,6 +168,7 @@ with st.sidebar:
         qdrant_mode = "Cloud ✅" if key_status['QDRANT_URL'] else "Local Memory 💾"
         st.markdown(f"**Qdrant:** {qdrant_mode}")
         st.markdown(f"**LangChain:** {'✅ Active' if key_status['LANGCHAIN_API_KEY'] else '⚪ Optional'}")
+
 
     st.divider()
 
@@ -404,7 +409,13 @@ with tab3:
 
     if st.session_state.eval_summary:
         summary = st.session_state.eval_summary
+        
+        if summary.get("degraded_mode"):
+            active_stubs_str = ", ".join(summary.get("degraded_components", []))
+            st.warning(f"⚠️ **RAGAS Evaluation executed in Degraded Mode** (Active fallbacks: `{active_stubs_str}`). Reported scores may not reflect the full production pipeline performance.")
+
         col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+
 
         with col_m1:
             st.markdown(f"""

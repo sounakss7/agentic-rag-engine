@@ -8,10 +8,11 @@ try:
 except ImportError:
     genai = None
 
-from config import config
+from config import config, is_degraded_mode, get_degraded_components
 
 logger = logging.getLogger("RAGASEvaluator")
 logger.setLevel(logging.INFO)
+
 
 
 class RAGASEvaluator:
@@ -165,17 +166,25 @@ class RAGASEvaluator:
                 "Context Precision": prec,
                 "RAGAS Score": ragas_score,
                 "Latency (s)": latency,
-                "Retrieved Chunks": len(contexts)
             })
 
         df = pd.DataFrame(results)
         num_cases = max(1, len(test_cases))
 
+        degraded = is_degraded_mode()
+        active_stubs = get_degraded_components()
+
         summary = {
             "avg_faithfulness": round(total_faith / num_cases, 3),
             "avg_precision": round(total_prec / num_cases, 3),
             "avg_ragas_score": round((total_faith + total_prec) / (2 * num_cases), 3),
-            "avg_latency_s": round(total_latency / num_cases, 2)
+            "avg_latency_s": round(total_latency / num_cases, 2),
+            "degraded_mode": degraded,
+            "degraded_components": active_stubs
         }
 
+        if degraded:
+            logger.warning(f"RAGAS Benchmark executed in DEGRADED MODE. Active stubs: {', '.join(active_stubs)}")
+
         return df, summary
+

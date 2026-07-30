@@ -1,10 +1,34 @@
 import os
-from typing import Dict, Optional, List, Any
+from typing import Dict, Optional, List, Set, Any
 from dataclasses import dataclass
 from dotenv import load_dotenv
 
 # Load local environment variables from .env if present
 load_dotenv()
+
+# Global Degraded Components Registry
+DEGRADED_COMPONENTS: Set[str] = set()
+
+
+def register_degraded_component(component_name: str) -> None:
+    """Registers a component operating in degraded/stub/fallback mode."""
+    DEGRADED_COMPONENTS.add(component_name)
+
+
+def clear_degraded_component(component_name: str) -> None:
+    """Removes a component from degraded registry."""
+    DEGRADED_COMPONENTS.discard(component_name)
+
+
+def get_degraded_components() -> List[str]:
+    """Returns sorted list of active degraded/fallback component names."""
+    return sorted(list(DEGRADED_COMPONENTS))
+
+
+def is_degraded_mode() -> bool:
+    """Returns True if any system component is currently running in degraded mode."""
+    return len(DEGRADED_COMPONENTS) > 0
+
 
 # Key Aliases mapping for flexible secret lookup
 KEY_ALIASES: Dict[str, List[str]] = {

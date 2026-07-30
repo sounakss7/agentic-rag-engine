@@ -1,42 +1,100 @@
 import math
 import logging
+import hashlib
 from typing import List, Dict, Any, Optional
 import numpy as np
 
-# Qdrant Vector Store with fallback
+from config import config, register_degraded_component, clear_degraded_component
+
+logger = logging.getLogger("HybridRetriever")
+logger.setLevel(logging.INFO)
+
+# Qdrant Vector Store with Cosine Similarity Fallback Stub
 try:
     from qdrant_client import QdrantClient
     from qdrant_client.models import Distance, VectorParams, PointStruct, Filter
+    IS_QDRANT_STUB = False
 except ImportError:
+    IS_QDRANT_STUB = True
+    register_degraded_component("QdrantClient (stub)")
+    
     class VectorParams:
-        def __init__(self, size=768, distance=None): pass
+        def __init__(self, size=768, distance=None):
+            self.size = size
+            self.distance = distance
+
     class PointStruct:
         def __init__(self, id=None, vector=None, payload=None):
-            self.id = id; self.vector = vector; self.payload = payload
+            self.id = id
+            self.vector = vector
+            self.payload = payload
+
     class Distance:
         COSINE = "COSINE"
+
     class QdrantClient:
+        """
+        Fallback Qdrant In-Memory Vector Store performing exact Cosine Similarity search.
+        Used when the qdrant-client package is not installed.
+        """
         def __init__(self, *args, **kwargs):
-            self.store = []
+            self.store: List[PointStruct] = []
+            logger.warning("[DEGRADED STUB] qdrant-client package missing. Running in-memory Cosine Similarity vector store.")
+
         def get_collections(self):
-            class Col: name = "crag_knowledge_base"
+            class Col: name = config.QDRANT_COLLECTION
             class Cols: collections = [Col()]
             return Cols()
+
         def create_collection(self, **kwargs): pass
-        def recreate_collection(self, **kwargs): self.store = []
-        def upsert(self, collection_name, points): self.store.extend(points)
+        
+        def recreate_collection(self, **kwargs):
+            self.store = []
+
+        def upsert(self, collection_name, points):
+            self.store.extend(points)
+
         def search(self, collection_name, query_vector, limit=10):
+            return self.query_points(collection_name, query_vector, limit)
+
+        def query_points(self, collection_name, query, limit=10):
             class Match:
-                def __init__(self, payload, score): self.payload = payload; self.score = score
-            results = []
-            for p in self.store[:limit]:
-                results.append(Match(p.payload, 0.85))
-            return results
+                def __init__(self, payload, score):
+                    self.payload = payload
+                    self.score = score
+
+            if not self.store or not query:
+                class Res: points = []
+                return Res()
+
+            q_vec = np.array(query, dtype=float)
+            q_norm = np.linalg.norm(q_vec)
+            scored_points = []
+
+            for p in self.store:
+                if hasattr(p, 'vector') and p.vector is not None:
+                    p_vec = np.array(p.vector, dtype=float)
+                    p_norm = np.linalg.norm(p_vec)
+                    if q_norm > 0 and p_norm > 0:
+                        cos_sim = float(np.dot(q_vec, p_vec) / (q_norm * p_norm))
+                    else:
+                        cos_sim = 0.0
+                else:
+                    cos_sim = 0.0
+                scored_points.append(Match(p.payload, cos_sim))
+
+            scored_points.sort(key=lambda x: x.score, reverse=True)
+
+            class Res:
+                points = scored_points[:limit]
+            return Res()
+
 
 # Rank-BM25 Sparse Retriever with fallback
 try:
     from rank_bm25 import BM25Okapi
 except ImportError:
+    register_degraded_component("BM25Okapi (stub)")
     class BM25Okapi:
         def __init__(self, corpus):
             self.corpus = corpus
@@ -49,32 +107,29 @@ except ImportError:
                 scores.append(float(match))
             return np.array(scores)
 
+
 # FlashRank Cross-Encoder Reranker
 try:
     from flashrank import Ranker, RerankRequest
 except ImportError:
+    register_degraded_component("FlashRank (stub)")
     Ranker = None
     RerankRequest = None
+
 
 # Google GenAI SDK
 try:
     from google import genai
 except ImportError:
+    register_degraded_component("Gemini GenAI (stub)")
     genai = None
-
-from config import config
-
-
-
-logger = logging.getLogger("HybridRetriever")
-logger.setLevel(logging.INFO)
 
 
 class HybridRetriever:
     """
     Hybrid Retrieval Engine combining:
     1. BM25 Sparse Keyword Search
-    2. Qdrant Dense Vector Search (Cloud or In-Memory)
+    2. Qdrant Dense Vector Search (Cloud or In-Memory Cosine Similarity)
     3. Reciprocal Rank Fusion (RRF)
     4. FlashRank Cross-Encoder Reranking
     """
@@ -84,25 +139,23 @@ class HybridRetriever:
         self.bm25: Optional[BM25Okapi] = None
         self.qdrant_client: Optional[QdrantClient] = None
         self.flashrank_reranker: Optional[Any] = None
-        self.genai_client: Optional[genai.Client] = None
 
         self._init_qdrant()
         self._init_flashrank()
-        self._init_genai()
 
-    def _init_genai(self) -> None:
-        """Initializes Google GenAI client if API key is provided."""
-        if config.GEMINI_API_KEY:
+    def _get_genai_client(self) -> Optional[Any]:
+        """Dynamically retrieves GenAI client using active GEMINI_API_KEY."""
+        if genai is not None and config.GEMINI_API_KEY:
             try:
-                self.genai_client = genai.Client(api_key=config.GEMINI_API_KEY)
+                return genai.Client(api_key=config.GEMINI_API_KEY)
             except Exception as e:
-                logger.warning(f"Failed to initialize Gemini GenAI client: {e}")
-                self.genai_client = None
+                logger.warning(f"GenAI client init error: {e}")
+        return None
 
     def _init_qdrant(self) -> None:
         """Initializes Qdrant client (Cloud or In-Memory fallback)."""
         try:
-            if config.QDRANT_URL and config.QDRANT_API_KEY:
+            if config.QDRANT_URL and config.QDRANT_API_KEY and not IS_QDRANT_STUB:
                 self.qdrant_client = QdrantClient(
                     url=config.QDRANT_URL,
                     api_key=config.QDRANT_API_KEY
@@ -110,12 +163,15 @@ class HybridRetriever:
                 logger.info(f"Connected to Qdrant Cloud at {config.QDRANT_URL}")
             else:
                 self.qdrant_client = QdrantClient(":memory:")
+                if not IS_QDRANT_STUB and not config.QDRANT_URL:
+                    register_degraded_component("Qdrant Local (:memory:)")
                 logger.info("Initialized Qdrant in Local In-Memory mode.")
 
             self._ensure_collection()
         except Exception as e:
             logger.warning(f"Qdrant initialization error: {e}. Falling back to in-memory mode.")
             self.qdrant_client = QdrantClient(":memory:")
+            register_degraded_component("Qdrant Local (:memory:)")
             self._ensure_collection()
 
     def _ensure_collection(self) -> None:
@@ -123,15 +179,18 @@ class HybridRetriever:
         if not self.qdrant_client:
             return
         
-        collections = [c.name for c in self.qdrant_client.get_collections().collections]
-        if config.QDRANT_COLLECTION not in collections:
-            self.qdrant_client.create_collection(
-                collection_name=config.QDRANT_COLLECTION,
-                vectors_config=VectorParams(
-                    size=config.EMBEDDING_DIM,
-                    distance=Distance.COSINE
+        try:
+            collections = [c.name for c in self.qdrant_client.get_collections().collections]
+            if config.QDRANT_COLLECTION not in collections:
+                self.qdrant_client.create_collection(
+                    collection_name=config.QDRANT_COLLECTION,
+                    vectors_config=VectorParams(
+                        size=config.EMBEDDING_DIM,
+                        distance=Distance.COSINE
+                    )
                 )
-            )
+        except Exception as e:
+            logger.warning(f"Qdrant collection creation notice: {e}")
 
     def _init_flashrank(self) -> None:
         """Initializes FlashRank cross-encoder reranker."""
@@ -141,19 +200,14 @@ class HybridRetriever:
                 logger.info(f"Loaded FlashRank Reranker: {config.FLASHRANK_MODEL}")
             except Exception as e:
                 logger.warning(f"FlashRank initialization error: {e}. Will fallback to score ordering.")
+                register_degraded_component("FlashRank (stub)")
                 self.flashrank_reranker = None
 
-    def _get_genai_client(self) -> Optional[genai.Client]:
-        """Dynamically retrieves GenAI client using active GEMINI_API_KEY."""
-        if genai is not None and config.GEMINI_API_KEY:
-            try:
-                return genai.Client(api_key=config.GEMINI_API_KEY)
-            except Exception as e:
-                logger.warning(f"GenAI client init error: {e}")
-        return None
-
     def get_embedding(self, text: str) -> List[float]:
-        """Generates embedding vector for input text via Gemini API text-embedding-004."""
+        """
+        Generates 768-dimensional embedding vector for input text via Gemini API text-embedding-004.
+        If Gemini API key is missing or call fails, falls back to deterministic SHA-256 vector generation.
+        """
         client = self._get_genai_client()
         if client:
             try:
@@ -162,18 +216,21 @@ class HybridRetriever:
                     contents=text
                 )
                 if hasattr(response, 'embedding') and hasattr(response.embedding, 'values'):
+                    clear_degraded_component("Gemini Embeddings (SHA256 fallback)")
                     return list(response.embedding.values)
                 elif hasattr(response, 'embeddings') and response.embeddings:
+                    clear_degraded_component("Gemini Embeddings (SHA256 fallback)")
                     return list(response.embeddings[0].values)
             except Exception as e:
-                logger.warning(f"Gemini embedding API call failed: {e}. Using fallback vector.")
+                logger.warning(f"Gemini embedding API call failed: {e}. Using deterministic SHA-256 fallback vector.")
 
-        # Deterministic fallback embedding based on text hash for offline/testing robustness
-        np.random.seed(abs(hash(text)) % (2**32))
+        # Stable, Process-Invariant SHA-256 Fallback Vector Generation
+        register_degraded_component("Gemini Embeddings (SHA256 fallback)")
+        seed = int(hashlib.sha256(text.encode("utf-8")).hexdigest(), 16) % (2**32)
+        np.random.seed(seed)
         vec = np.random.randn(config.EMBEDDING_DIM)
         norm = np.linalg.norm(vec)
         return (vec / norm).tolist()
-
 
     def build_index(self, chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
@@ -190,14 +247,16 @@ class HybridRetriever:
         # 2. Build Qdrant Dense Index
         self._ensure_collection()
         
-        # Reset existing vectors in collection
-        self.qdrant_client.recreate_collection(
-            collection_name=config.QDRANT_COLLECTION,
-            vectors_config=VectorParams(
-                size=config.EMBEDDING_DIM,
-                distance=Distance.COSINE
+        try:
+            self.qdrant_client.recreate_collection(
+                collection_name=config.QDRANT_COLLECTION,
+                vectors_config=VectorParams(
+                    size=config.EMBEDDING_DIM,
+                    distance=Distance.COSINE
+                )
             )
-        )
+        except Exception:
+            pass
 
         points = []
         for idx, chunk in enumerate(chunks):
@@ -212,7 +271,7 @@ class HybridRetriever:
                 }
             ))
 
-        # Upload in batches
+        # Upload points
         batch_size = 64
         for i in range(0, len(points), batch_size):
             self.qdrant_client.upsert(
@@ -252,8 +311,13 @@ class HybridRetriever:
 
     def dense_search(self, query: str, top_k: int = 10) -> List[Dict[str, Any]]:
         """Qdrant Vector Similarity search."""
+        if not self.qdrant_client or not self.chunks:
+            return []
+
         query_vector = self.get_embedding(query)
         results = []
+
+        retrieval_mode = "stub" if IS_QDRANT_STUB else ("cloud" if config.QDRANT_URL else "memory")
 
         try:
             if hasattr(self.qdrant_client, 'search'):
@@ -281,13 +345,13 @@ class HybridRetriever:
                     "metadata": payload.get("metadata", {}),
                     "score": float(score),
                     "rank": rank + 1,
-                    "search_type": "dense"
+                    "search_type": "dense",
+                    "retrieval_mode": retrieval_mode
                 })
         except Exception as e:
             logger.warning(f"Dense vector search warning: {e}")
 
         return results
-
 
     def reciprocal_rank_fusion(
         self,
@@ -318,7 +382,6 @@ class HybridRetriever:
             if cid not in chunk_map:
                 chunk_map[cid] = item
 
-        # Sort by RRF score descending
         sorted_cids = sorted(rrf_scores.keys(), key=lambda cid: rrf_scores[cid], reverse=True)
 
         fused_results = []
@@ -354,8 +417,10 @@ class HybridRetriever:
                 return reranked
             except Exception as e:
                 logger.warning(f"FlashRank reranking error: {e}. Returning RRF top_n.")
+                register_degraded_component("FlashRank (stub)")
 
         # Fallback if FlashRank is unavailable
+        register_degraded_component("FlashRank (stub)")
         for item in candidates:
             item["rerank_score"] = item.get("rrf_score", 0.5)
         return candidates[:top_n]
