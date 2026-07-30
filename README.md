@@ -10,7 +10,7 @@
 [![Gemini 2.5 Flash](https://img.shields.io/badge/LLM-Gemini_2.5_Flash-purple.svg)](https://aistudio.google.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-An enterprise-grade, production-ready **Corrective Retrieval-Augmented Generation (CRAG)** platform designed to eliminate LLM hallucinations, handle unsearchable scanned documents via OCR, and fall back to live web search dynamically.
+An enterprise-grade, production-ready **Corrective Retrieval-Augmented Generation (CRAG)** platform designed to eliminate LLM hallucinations, handle unsearchable scanned documents via Multimodal Vision OCR, and fall back to live web search dynamically.
 
 🌐 **Live Production Application**: [https://agentic-rag-engine.streamlit.app/](https://agentic-rag-engine.streamlit.app/)  
 📂 **GitHub Repository**: [https://github.com/sounakss7/agentic-rag-engine](https://github.com/sounakss7/agentic-rag-engine)
@@ -24,7 +24,7 @@ An enterprise-grade, production-ready **Corrective Retrieval-Augmented Generatio
 - [Why Corrective RAG (CRAG)?](#-why-corrective-rag-crag)
 - [System Architecture & Flowchart](#-system-architecture--flowchart)
 - [Deep Dive: Subsystems & Technical Details](#-deep-dive-subsystems--technical-details)
-  - [1. Multimodal OCR Ingestion Engine (`ocr_parser.py`)](#1-multimodal-ocr-ingestion-engine-ocr_parserpy)
+  - [1. Multimodal Vision OCR Ingestion Engine (`ocr_parser.py`)](#1-multimodal-vision-ocr-ingestion-engine-ocr_parserpy)
   - [2. Hybrid Retrieval & Cross-Encoder Reranking (`retriever.py`)](#2-hybrid-retrieval--cross-encoder-reranking-retrieverpy)
   - [3. LangGraph CRAG Multi-Node State Machine (`graph_nodes.py`)](#3-langgraph-crag-multi-node-state-machine-graph_nodespy)
   - [4. Automated RAGAS Evaluation Engine (`eval_pipeline.py`)](#4-automated-ragas-evaluation-engine-eval_pipelinepy)
@@ -52,9 +52,9 @@ The **Enterprise CRAG Engine** addresses this fundamental vulnerability by intro
 | :--- | :--- |
 | **Noisy Vector Results**: Low relevance chunks cause hallucinated answers. | **Context Grading Node**: Uses Gemini 2.5 Flash to evaluate relevance before answer generation. |
 | **Out-of-Domain Queries**: Vector store has no answers for unindexed topics. | **Tavily Fallback Route**: Dynamically rewrites queries and searches the live web. |
-| **Scanned PDFs & Images**: Plain text extractors fail on scanned documents. | **Hybrid OCR Pipeline**: Combines native extraction with `pdf2image` + `pytesseract`. |
+| **Scanned PDFs & Images**: Plain text extractors fail on scanned documents. | **Multimodal Vision OCR**: Combines native extraction + `pytesseract` + **Gemini 2.5 Flash Vision OCR**. |
 | **Keyword vs. Semantic Mismatch**: Pure vector search misses exact keyword matches. | **Hybrid Search + RRF**: Merges BM25 Sparse Search + Qdrant Dense Embeddings + FlashRank Cross-Encoder. |
-| **Black-box AI Execution**: Users cannot verify how an answer was derived. | **Real-Time Execution Trace**: Visualizes graph node state transitions in real time. |
+| **Silent Fallbacks & Black-box AI**: Unknown degraded states or missing keys. | **Transparent Degraded Mode Registry**: Real-time diagnostic logging and UI warning banners. |
 
 ---
 
@@ -85,19 +85,20 @@ flowchart TD
 
 ## 🔬 Deep Dive: Subsystems & Technical Details
 
-### 1. Multimodal OCR Ingestion Engine (`ocr_parser.py`)
+### 1. Multimodal Vision OCR Ingestion Engine (`ocr_parser.py`)
 - **Supported File Types**: `.pdf`, `.png`, `.jpg`, `.jpeg`, `.txt`, `.md`.
-- **Native PDF Parsing**: Uses `pypdf` and `pdfplumber` for text extraction.
-- **PyTesseract OCR Fallback**: If a PDF page contains fewer than 30 characters (indicating a scanned document or image PDF), `pdf2image` converts the page into high-resolution images, passing them through `pytesseract` OCR.
+- **Native PDF Parsing**: Uses `pypdf` and `pdfplumber` for native text extraction.
+- **PyTesseract & Gemini Vision OCR Fallback**: If a PDF page contains fewer than 30 characters (indicating a scanned document or image PDF), `pdf2image` converts the page into high-resolution images. If system OCR binaries are unavailable on cloud servers, the engine seamlessly uses **Gemini 2.5 Flash Multimodal Vision** to extract full text directly.
 - **Intelligent Chunking**: Employs `RecursiveCharacterTextSplitter` (default chunk size: 800 chars, overlap: 120 chars) while preserving metadata (`source`, `page`, `chunk_id`, `ocr_used`).
 
 ### 2. Hybrid Retrieval & Cross-Encoder Reranking (`retriever.py`)
 The retrieval engine combines sparse keyword and dense semantic vector search:
-- **Sparse Keyword Search**: `BM25Okapi` over tokenized corpus.
-- **Dense Vector Search**: `QdrantClient` using Gemini `text-embedding-004` (768 dimensions). Supports **Qdrant Cloud** and **Local In-Memory Mode** (`:memory:`).
+- **Sparse Keyword Search**: `BM25Okapi` over tokenized document corpus.
+- **Dense Vector Search**: `QdrantClient` using Gemini `text-embedding-004` (768 dimensions). Supports **Qdrant Cloud** and an **In-Memory Cosine Similarity Store** (`:memory:`) computing exact dot products across vector embeddings.
+- **Process-Invariant SHA-256 Fallback**: If API keys are absent, fallback embeddings generate deterministic vectors via SHA-256 text hashing (`hashlib.sha256`).
 - **Reciprocal Rank Fusion (RRF)**: Fuses sparse and dense rankings via:
   $$RRF\_Score(d) = \sum_{m \in \{Sparse, Dense\}} \frac{1}{k + r_m(d)} \quad (k=60)$$
-- **Cross-Encoder Reranking**: Uses **FlashRank** (`ms-marco-MiniLM-L-6-v2`) to re-score fused candidates and select the top $N=3$ context chunks.
+- **Cross-Encoder Reranking**: Uses **FlashRank** (`ms-marco-MiniLM-L-6-v2`) with writable temp cache directory fallbacks to re-score fused candidates and select the top $N=3$ context chunks.
 
 ### 3. LangGraph CRAG Multi-Node State Machine (`graph_nodes.py`)
 - **`GraphState` Schema**:
@@ -124,11 +125,11 @@ The retrieval engine combines sparse keyword and dense semantic vector search:
 Provides continuous quality monitoring across two core RAGAS metrics:
 - **Faithfulness**: Verifies whether claims in the generated response are strictly grounded in the retrieved context (hallucination check).
 - **Context Precision**: Evaluates the signal-to-noise ratio of retrieved context chunks.
-- Computes harmonic mean RAGAS scores and latency breakdowns in interactive Pandas DataFrames.
+- Computes harmonic mean RAGAS scores and latency breakdowns in interactive Pandas DataFrames, explicitly flagging if evaluation runs in degraded mode.
 
 ### 5. Streamlit Frontend & Control Center (`app.py`)
 - **Dark Glassmorphic UI**: Styled with custom CSS for enterprise aesthetics.
-- **Tab 1: Interactive Chat Engine**: Chat interface with message memory, node execution trace expanders, retrieval confidence badges, and citation popovers.
+- **Tab 1: Interactive Chat Engine**: Chat interface with auto-indexing on file upload, node execution trace expanders, retrieval confidence badges, and citation popovers.
 - **Tab 2: Document Inspector**: View indexed chunks, extracted OCR text, chunk metadata, and vector database stats.
 - **Tab 3: RAGAS Evaluation Dashboard**: Trigger automated test suites and inspect metrics cards.
 
@@ -142,7 +143,7 @@ agentic-rag-engine/
 │   └── secrets.toml          # Template for Streamlit Cloud secret keys
 ├── app.py                    # Main Streamlit web application (UI & Control Center)
 ├── config.py                 # Configuration dataclass & alias secret resolver
-├── ocr_parser.py             # DocumentIngestor (PDF parsing, OCR, text chunking)
+├── ocr_parser.py             # DocumentIngestor (PDF parsing, Vision OCR, text chunking)
 ├── retriever.py              # HybridRetriever (BM25, Qdrant, RRF, FlashRank)
 ├── graph_nodes.py            # CRAGGraph (LangGraph multi-node state machine)
 ├── eval_pipeline.py          # RAGASEvaluator (Faithfulness & Context Precision)
@@ -232,7 +233,6 @@ The built-in evaluation engine (`eval_pipeline.py`) runs test benchmark queries 
 | **Average Latency** | **~ 0.3s - 1.5s** | Execution time depending on LLM response time and search fallback routes. |
 
 > *Note: Scores vary depending on document density, LLM model choice, and query complexity. The dashboard in Tab 3 allows real-time evaluation runs on custom document sets.*
-
 
 ---
 
