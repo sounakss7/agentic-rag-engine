@@ -110,17 +110,16 @@ class CRAGGraph:
 
     def __init__(self, retriever: HybridRetriever):
         self.retriever = retriever
-        self.client: Optional[genai.Client] = None
-        self._init_genai()
         self.graph = self._build_graph()
 
-    def _init_genai(self) -> None:
-        """Initialize Google GenAI client."""
-        if config.GEMINI_API_KEY:
+    def get_client(self) -> Optional[genai.Client]:
+        """Dynamically retrieves GenAI client using active GEMINI_API_KEY."""
+        if genai is not None and config.GEMINI_API_KEY:
             try:
-                self.client = genai.Client(api_key=config.GEMINI_API_KEY)
+                return genai.Client(api_key=config.GEMINI_API_KEY)
             except Exception as e:
-                logger.warning(f"Failed to initialize GenAI client in CRAGGraph: {e}")
+                logger.warning(f"GenAI client init error: {e}")
+        return None
 
     # ==================== NODE DEFINITIONS ====================
 
@@ -131,7 +130,8 @@ class CRAGGraph:
         trace.append("🔹 [Node 1: HyDE Generator] Generating hypothetical answer document...")
 
         hyde_doc = query
-        if self.client:
+        client = self.get_client()
+        if client:
             prompt = (
                 f"You are an expert technical researcher. Please write a concise hypothetical paragraph "
                 f"or ideal answer that directly answers the user's question.\n"
@@ -139,7 +139,7 @@ class CRAGGraph:
                 f"Hypothetical Answer:"
             )
             try:
-                response = self.client.models.generate_content(
+                response = client.models.generate_content(
                     model=config.LLM_MODEL,
                     contents=prompt
                 )
@@ -147,6 +147,7 @@ class CRAGGraph:
                     hyde_doc = response.text.strip()
             except Exception as e:
                 logger.warning(f"HyDE generation failed: {e}. Using original query.")
+
 
         return {
             "hyde_doc": hyde_doc,
@@ -194,7 +195,8 @@ class CRAGGraph:
             score = 0.8
             reasoning = "Default evaluation"
 
-            if self.client:
+            client = self.get_client()
+            if client and types is not None:
                 prompt = (
                     f"You are a strict relevance evaluator. Determine if the following retrieved document chunk "
                     f"is relevant to answer the user query.\n\n"
@@ -203,7 +205,7 @@ class CRAGGraph:
                     f"Grade the document for answerability."
                 )
                 try:
-                    response = self.client.models.generate_content(
+                    response = client.models.generate_content(
                         model=config.LLM_MODEL,
                         contents=prompt,
                         config=types.GenerateContentConfig(
@@ -251,13 +253,14 @@ class CRAGGraph:
         trace.append("🌐 [Node 4: Corrective Fallback] Rewriting query and performing Tavily Web Search...")
 
         rewritten_query = query
-        if self.client:
+        client = self.get_client()
+        if client:
             prompt = (
                 f"You are a search query optimizer. Rewrite the following user question into a clean, "
                 f"effective search query for web retrieval:\nQuestion: {query}\n\nSearch Query:"
             )
             try:
-                res = self.client.models.generate_content(model=config.LLM_MODEL, contents=prompt)
+                res = client.models.generate_content(model=config.LLM_MODEL, contents=prompt)
                 if res.text:
                     rewritten_query = res.text.strip()
             except Exception:
@@ -326,7 +329,8 @@ class CRAGGraph:
 
         confidence_score = round(total_score / max(1, len(documents)), 2) if documents else 0.5
 
-        if self.client:
+        client = self.get_client()
+        if client:
             prompt = (
                 f"You are an enterprise AI assistant trained on Advanced Corrective RAG.\n"
                 f"Answer the user's question thoroughly using ONLY the provided context chunks.\n"
@@ -337,7 +341,7 @@ class CRAGGraph:
                 f"Detailed Answer:"
             )
             try:
-                response = self.client.models.generate_content(
+                response = client.models.generate_content(
                     model=config.LLM_MODEL,
                     contents=prompt
                 )
@@ -356,6 +360,7 @@ class CRAGGraph:
             "source_type": source_type,
             "node_trace": trace
         }
+
 
     # ==================== ROUTING LOGIC ====================
 

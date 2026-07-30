@@ -240,7 +240,8 @@ with tab1:
     st.subheader("Interactive CRAG Engine Chat")
     
     if not st.session_state.indexed_chunks:
-        st.info("💡 **Getting Started**: Upload documents in the sidebar and click **Build Vector Index** to query your knowledge base. Queries outside your uploaded documents will trigger Tavily Fallback Web Search automatically.")
+        st.warning("⚠️ **Vector Index is Empty (0 Chunks)**: You must upload your documents in the sidebar and click **🚀 Build / Refresh Vector Index** to index them! Searching before building the index will route queries to external Tavily Web Search.")
+
 
     # Render previous messages
     for msg in st.session_state.chat_history:
