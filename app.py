@@ -300,28 +300,29 @@ with tab1:
         with st.chat_message("user"):
             st.markdown(user_query)
 
-        # Assistant processing
+        # Assistant streaming processing
         with st.chat_message("assistant"):
-            with st.spinner("Orchestrating CRAG LangGraph Nodes (HyDE ➔ Hybrid Retrieval ➔ Context Grading ➔ Synthesis)..."):
-                start_t = time.time()
-                graph_output = st.session_state.crag_graph.run(user_query)
-                elapsed = round(time.time() - start_t, 2)
+            start_t = time.time()
+            with st.spinner("Orchestrating CRAG Nodes (HyDE ➔ Hybrid Retrieval ➔ Context Grading)..."):
+                prep_state = st.session_state.crag_graph.prepare_context(user_query)
+                elapsed_retrieval = round(time.time() - start_t, 2)
 
-            ans_text = graph_output.get("generation", "No response generated.")
-            source_type = graph_output.get("source_type", "Retrieved from Qdrant Vector Store")
-            conf_score = graph_output.get("confidence_score", 0.85)
-            node_trace = graph_output.get("node_trace", [])
-            graded_docs = graph_output.get("graded_documents", [])
+            source_type = prep_state.get("source_type", "Retrieved from Qdrant Vector Store")
+            conf_score = prep_state.get("confidence_score", 0.85)
+            node_trace = prep_state.get("node_trace", [])
+            graded_docs = prep_state.get("graded_documents", [])
+            prompt = prep_state.get("prompt", "")
 
-            # Render Badge
+            # Render Badge & Latency
             badge_class = "badge-tavily" if "Tavily" in source_type else "badge-qdrant"
             st.markdown(f"""
             <span class="{badge_class}">{source_type}</span>
             <span class="confidence-badge">Confidence: {int(conf_score * 100)}%</span>
-            <span style="font-size: 0.8rem; color: #94a3b8; margin-left: 10px;">(Latency: {elapsed}s)</span>
+            <span style="font-size: 0.8rem; color: #94a3b8; margin-left: 10px;">(Retrieval & Grading: {elapsed_retrieval}s)</span>
             """, unsafe_allow_html=True)
 
-            st.markdown(ans_text)
+            # Live Token Streaming Output
+            ans_text = st.write_stream(st.session_state.crag_graph.stream_generation(prompt))
 
             # Node Execution Trace Expander
             with st.expander("🔄 View LangGraph CRAG Execution Trace"):
@@ -346,6 +347,7 @@ with tab1:
                 "documents": graded_docs,
                 "id": len(st.session_state.chat_history)
             })
+
 
 
 # -----------------------------------------------------------------------------
