@@ -1,17 +1,32 @@
 import time
 import json
 import logging
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 import pandas as pd
+from pydantic import BaseModel, Field
+
 try:
     from google import genai
+    from google.genai import types
 except ImportError:
     genai = None
+    types = None
 
 from config import config
 
 logger = logging.getLogger("RAGASEvaluator")
 logger.setLevel(logging.INFO)
+
+
+# Pydantic Schemas for RAGAS Evaluation LLM Judge
+class FaithfulnessEval(BaseModel):
+    faithfulness_score: float = Field(description="Score between 0.0 and 1.0 evaluating if answer is grounded in context.")
+    reason: str = Field(description="Short rationale for the score.")
+
+
+class ContextPrecisionEval(BaseModel):
+    precision_score: float = Field(description="Score between 0.0 and 1.0 evaluating percentage of relevant context chunks.")
+    reason: str = Field(description="Short rationale for the score.")
 
 
 class RAGASEvaluator:
@@ -22,13 +37,14 @@ class RAGASEvaluator:
     2. Context Precision: Evaluates signal-to-noise ratio of retrieved context chunks.
     """
 
-    def __init__(self):
-        self.client: Optional[genai.Client] = None
-        if config.GEMINI_API_KEY:
+    def _get_client() -> Optional[genai.Client]:
+        """Dynamically retrieves GenAI client using active GEMINI_API_KEY."""
+        if genai is not None and config.GEMINI_API_KEY:
             try:
-                self.client = genai.Client(api_key=config.GEMINI_API_KEY)
+                return genai.Client(api_key=config.GEMINI_API_KEY)
             except Exception as e:
-                logger.warning(f"RAGASEvaluator GenAI init warning: {e}")
+                logger.warning(f"RAGASEvaluator GenAI client init error: {e}")
+        return None
 
     def evaluate_response(
         self,
@@ -49,8 +65,9 @@ class RAGASEvaluator:
                 "precision_reason": "Empty context provided"
             }
 
-        faithfulness = self._eval_faithfulness(generation, contexts)
-        context_precision = self._eval_context_precision(query, contexts)
+        client = self._get_client()
+        faithfulness = self._eval_faithfulness(client, generation, contexts)
+        context_precision = self._eval_context_precision(client, query, contexts)
 
         ragas_score = round((2 * faithfulness * context_precision) / max(0.001, (faithfulness + context_precision)), 2)
 
@@ -60,41 +77,44 @@ class RAGASEvaluator:
             "ragas_score": min(1.0, ragas_score),
         }
 
-    def _eval_faithfulness(self, generation: str, contexts: List[str]) -> float:
-        """Evaluates if generation is grounded in contexts."""
-        if not self.client:
-            # Fallback text overlap heuristic
+    def _eval_faithfulness(self, client: Optional[genai.Client], generation: str, contexts: List[str]) -> float:
+        """Evaluates if generation is grounded in contexts using Gemini LLM Judge with Pydantic output."""
+        if not client or types is None:
+            # Heuristic text overlap calculation
             gen_words = set(generation.lower().split())
             ctx_words = set(" ".join(contexts).lower().split())
             if not gen_words:
                 return 0.0
             overlap = len(gen_words.intersection(ctx_words))
-            return min(1.0, round(overlap / len(gen_words) + 0.3, 2))
+            return min(1.0, round(overlap / max(1, len(gen_words)), 2))
 
         combined_ctx = "\n".join(f"- {c}" for c in contexts)
         prompt = (
             f"You are a strict RAG Faithfulness Evaluator.\n"
-            f"Evaluate if every statement in the Generated Answer is fully supported by the Context.\n"
+            f"Evaluate if every statement in the Generated Answer is fully supported by the Context.\n\n"
             f"Context:\n{combined_ctx}\n\n"
             f"Generated Answer:\n{generation}\n\n"
-            f"Respond in JSON format with keys:\n"
-            f'{{"faithfulness_score": <float between 0.0 and 1.0>, "reason": "<short description>"}}'
+            f"Grade the faithfulness score between 0.0 and 1.0."
         )
 
         try:
-            res = self.client.models.generate_content(
+            res = client.models.generate_content(
                 model=config.LLM_MODEL,
                 contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=FaithfulnessEval,
+                )
             )
-            parsed = json.loads(res.text.strip().replace("```json", "").replace("```", ""))
-            return float(parsed.get("faithfulness_score", 0.85))
+            parsed = json.loads(res.text)
+            return min(1.0, max(0.0, float(parsed.get("faithfulness_score", 0.9))))
         except Exception as e:
-            logger.warning(f"Faithfulness eval LLM parse error: {e}")
+            logger.warning(f"Faithfulness LLM evaluation error: {e}")
             return 0.85
 
-    def _eval_context_precision(self, query: str, contexts: List[str]) -> float:
-        """Evaluates precision of retrieved context chunks relative to query."""
-        if not self.client:
+    def _eval_context_precision(self, client: Optional[genai.Client], query: str, contexts: List[str]) -> float:
+        """Evaluates precision of retrieved context chunks relative to query using Gemini LLM Judge."""
+        if not client or types is None:
             query_words = set(query.lower().split())
             rel_chunks = 0
             for c in contexts:
@@ -106,22 +126,25 @@ class RAGASEvaluator:
         combined_ctx = "\n".join(f"Chunk {i+1}: {c}" for i, c in enumerate(contexts))
         prompt = (
             f"You are a Context Precision Evaluator.\n"
-            f"Determine what percentage of the retrieved chunks contain relevant signal to answer the question.\n"
+            f"Determine what percentage of the retrieved chunks contain relevant signal to answer the question.\n\n"
             f"Question: {query}\n\n"
             f"Retrieved Chunks:\n{combined_ctx}\n\n"
-            f"Respond in JSON format with keys:\n"
-            f'{{"precision_score": <float between 0.0 and 1.0>, "reason": "<short description>"}}'
+            f"Grade the precision score between 0.0 and 1.0."
         )
 
         try:
-            res = self.client.models.generate_content(
+            res = client.models.generate_content(
                 model=config.LLM_MODEL,
                 contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=ContextPrecisionEval,
+                )
             )
-            parsed = json.loads(res.text.strip().replace("```json", "").replace("```", ""))
-            return float(parsed.get("precision_score", 0.80))
+            parsed = json.loads(res.text)
+            return min(1.0, max(0.0, float(parsed.get("precision_score", 0.85))))
         except Exception as e:
-            logger.warning(f"Context precision LLM parse error: {e}")
+            logger.warning(f"Context precision LLM evaluation error: {e}")
             return 0.80
 
     def run_benchmark_suite(
