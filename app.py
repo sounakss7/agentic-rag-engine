@@ -165,27 +165,7 @@ with st.sidebar:
         st.markdown(f"**Qdrant:** {qdrant_mode}")
         st.markdown(f"**LangChain:** {'✅ Active' if key_status['LANGCHAIN_API_KEY'] else '⚪ Optional'}")
 
-    with st.expander("⚙️ Configure / Override API Keys"):
-        st.caption("If not set in Streamlit Secrets, enter your keys below:")
-        input_gemini = st.text_input("Gemini API Key", type="password", key="ui_gemini_key", value=st.session_state.get("GEMINI_API_KEY", ""))
-        input_tavily = st.text_input("Tavily API Key", type="password", key="ui_tavily_key", value=st.session_state.get("TAVILY_API_KEY", ""))
-        input_qdrant_url = st.text_input("Qdrant URL (Optional)", key="ui_qdrant_url", value=st.session_state.get("QDRANT_URL", ""))
-        input_qdrant_key = st.text_input("Qdrant API Key (Optional)", type="password", key="ui_qdrant_key", value=st.session_state.get("QDRANT_API_KEY", ""))
-        
-        if st.button("Save & Refresh Keys", use_container_width=True):
-            if input_gemini.strip(): st.session_state["GEMINI_API_KEY"] = input_gemini.strip()
-            if input_tavily.strip(): st.session_state["TAVILY_API_KEY"] = input_tavily.strip()
-            if input_qdrant_url.strip(): st.session_state["QDRANT_URL"] = input_qdrant_url.strip()
-            if input_qdrant_key.strip(): st.session_state["QDRANT_API_KEY"] = input_qdrant_key.strip()
-            
-            # Re-initialize graph and evaluator with updated keys
-            st.session_state.crag_graph = CRAGGraph(st.session_state.retriever)
-            st.session_state.evaluator = RAGASEvaluator()
-            st.success("API keys updated!")
-            st.rerun()
-
     st.divider()
-
 
     # --- Section 2: Document Ingestion & OCR ---
     st.subheader("📁 Document Ingestion & OCR")
@@ -300,29 +280,28 @@ with tab1:
         with st.chat_message("user"):
             st.markdown(user_query)
 
-        # Assistant streaming processing
+        # Assistant processing
         with st.chat_message("assistant"):
-            start_t = time.time()
-            with st.spinner("Orchestrating CRAG Nodes (HyDE ➔ Hybrid Retrieval ➔ Context Grading)..."):
-                prep_state = st.session_state.crag_graph.prepare_context(user_query)
-                elapsed_retrieval = round(time.time() - start_t, 2)
+            with st.spinner("Orchestrating CRAG LangGraph Nodes (HyDE ➔ Hybrid Retrieval ➔ Context Grading ➔ Synthesis)..."):
+                start_t = time.time()
+                graph_output = st.session_state.crag_graph.run(user_query)
+                elapsed = round(time.time() - start_t, 2)
 
-            source_type = prep_state.get("source_type", "Retrieved from Qdrant Vector Store")
-            conf_score = prep_state.get("confidence_score", 0.85)
-            node_trace = prep_state.get("node_trace", [])
-            graded_docs = prep_state.get("graded_documents", [])
-            prompt = prep_state.get("prompt", "")
+            ans_text = graph_output.get("generation", "No response generated.")
+            source_type = graph_output.get("source_type", "Retrieved from Qdrant Vector Store")
+            conf_score = graph_output.get("confidence_score", 0.85)
+            node_trace = graph_output.get("node_trace", [])
+            graded_docs = graph_output.get("graded_documents", [])
 
-            # Render Badge & Latency
+            # Render Badge
             badge_class = "badge-tavily" if "Tavily" in source_type else "badge-qdrant"
             st.markdown(f"""
             <span class="{badge_class}">{source_type}</span>
             <span class="confidence-badge">Confidence: {int(conf_score * 100)}%</span>
-            <span style="font-size: 0.8rem; color: #94a3b8; margin-left: 10px;">(Retrieval & Grading: {elapsed_retrieval}s)</span>
+            <span style="font-size: 0.8rem; color: #94a3b8; margin-left: 10px;">(Latency: {elapsed}s)</span>
             """, unsafe_allow_html=True)
 
-            # Live Token Streaming Output
-            ans_text = st.write_stream(st.session_state.crag_graph.stream_generation(prompt))
+            st.markdown(ans_text)
 
             # Node Execution Trace Expander
             with st.expander("🔄 View LangGraph CRAG Execution Trace"):
@@ -347,7 +326,6 @@ with tab1:
                 "documents": graded_docs,
                 "id": len(st.session_state.chat_history)
             })
-
 
 
 # -----------------------------------------------------------------------------

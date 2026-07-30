@@ -1,85 +1,44 @@
 import os
-from typing import Dict, Optional, List, Any
+from typing import Dict, Optional, Any
 from dataclasses import dataclass
 from dotenv import load_dotenv
 
 # Load local environment variables from .env if present
 load_dotenv()
 
-# Key Aliases mapping for flexible secret lookup
-KEY_ALIASES: Dict[str, List[str]] = {
-    "GEMINI_API_KEY": ["GEMINI_API_KEY", "GOOGLE_API_KEY", "gemini_api_key", "google_api_key", "GEMINI_KEY"],
-    "QDRANT_URL": ["QDRANT_URL", "qdrant_url", "QDRANT_HOST"],
-    "QDRANT_API_KEY": ["QDRANT_API_KEY", "qdrant_api_key"],
-    "TAVILY_API_KEY": ["TAVILY_API_KEY", "tavily_api_key", "TAVILY_KEY"],
-    "LANGCHAIN_API_KEY": ["LANGCHAIN_API_KEY", "langchain_api_key", "LANGSMITH_API_KEY"],
-}
-
-
 def get_secret(key_name: str, default: Optional[str] = None) -> Optional[str]:
     """
-    Robust secret resolver:
-    1. Checks Streamlit Session State (UI input overrides)
-    2. Checks Streamlit Secrets (top-level and nested, case-insensitive, aliases)
-    3. Checks environment variables (case-insensitive, aliases)
+    Retrieves a secret preferentially from Streamlit Secrets (if running in Streamlit),
+    falling back to os.environ.
     """
-    aliases = KEY_ALIASES.get(key_name, [key_name, key_name.lower()])
-
-    # 1. Check Streamlit session_state (user entered key in UI)
+    # Try reading from streamlit secrets safely
     try:
         import streamlit as st
-        for alias in aliases:
-            if alias in st.session_state and st.session_state[alias]:
-                val = str(st.session_state[alias]).strip()
-                if val:
-                    return val
+        if hasattr(st, "secrets") and key_name in st.secrets:
+            val = st.secrets[key_name]
+            if val and str(val).strip():
+                return str(val).strip()
     except Exception:
         pass
-
-    # 2. Check Streamlit Secrets (st.secrets)
-    try:
-        import streamlit as st
-        if hasattr(st, "secrets") and st.secrets is not None:
-            # Direct lookup
-            for alias in aliases:
-                if alias in st.secrets and st.secrets[alias]:
-                    val = str(st.secrets[alias]).strip()
-                    if val:
-                        return val
-            
-            # Case-insensitive top-level lookup
-            sec_dict = dict(st.secrets)
-            for alias in aliases:
-                for k, v in sec_dict.items():
-                    if str(k).upper() == alias.upper() and v:
-                        val = str(v).strip()
-                        if val:
-                            return val
-
-            # Check nested sections like [secrets] or [default]
-            for section in ["secrets", "default", "env"]:
-                if section in st.secrets:
-                    sec = st.secrets[section]
-                    for alias in aliases:
-                        if alias in sec and sec[alias]:
-                            val = str(sec[alias]).strip()
-                            if val:
-                                return val
-    except Exception:
-        pass
-
-    # 3. Check environment variables
-    for alias in aliases:
-        env_val = os.getenv(alias)
-        if env_val and str(env_val).strip():
-            return str(env_val).strip()
-
+    
+    # Fallback to environment variables
+    env_val = os.getenv(key_name, default)
+    if env_val and str(env_val).strip():
+        return str(env_val).strip()
+    
     return default
 
 
 @dataclass
 class AppConfig:
     """Central configuration for Advanced CRAG Engine."""
+    # API Keys
+    GEMINI_API_KEY: Optional[str] = None
+    QDRANT_URL: Optional[str] = None
+    QDRANT_API_KEY: Optional[str] = None
+    TAVILY_API_KEY: Optional[str] = None
+    LANGCHAIN_API_KEY: Optional[str] = None
+
     # LLM & Embeddings Settings
     LLM_MODEL: str = "gemini-2.5-flash"
     EMBEDDING_MODEL: str = "text-embedding-004"
@@ -100,32 +59,17 @@ class AppConfig:
     # CRAG Evaluation Thresholds
     RELEVANCE_THRESHOLD: float = 0.6
 
-    @property
-    def GEMINI_API_KEY(self) -> Optional[str]:
-        return get_secret("GEMINI_API_KEY")
-
-    @property
-    def QDRANT_URL(self) -> Optional[str]:
-        return get_secret("QDRANT_URL")
-
-    @property
-    def QDRANT_API_KEY(self) -> Optional[str]:
-        return get_secret("QDRANT_API_KEY")
-
-    @property
-    def TAVILY_API_KEY(self) -> Optional[str]:
-        return get_secret("TAVILY_API_KEY")
-
-    @property
-    def LANGCHAIN_API_KEY(self) -> Optional[str]:
-        return get_secret("LANGCHAIN_API_KEY")
-
     def refresh_keys(self) -> None:
-        """Triggers dynamic check of secret status."""
-        pass
+        """Loads or updates keys from secrets / env."""
+        self.GEMINI_API_KEY = get_secret("GEMINI_API_KEY")
+        self.QDRANT_URL = get_secret("QDRANT_URL")
+        self.QDRANT_API_KEY = get_secret("QDRANT_API_KEY")
+        self.TAVILY_API_KEY = get_secret("TAVILY_API_KEY")
+        self.LANGCHAIN_API_KEY = get_secret("LANGCHAIN_API_KEY")
 
     def key_status(self) -> Dict[str, bool]:
         """Returns status map of key availability."""
+        self.refresh_keys()
         return {
             "GEMINI_API_KEY": bool(self.GEMINI_API_KEY),
             "QDRANT_URL": bool(self.QDRANT_URL),
@@ -137,3 +81,4 @@ class AppConfig:
 
 # Global Config Singleton
 config = AppConfig()
+config.refresh_keys()
