@@ -149,3 +149,22 @@ class AppConfig:
 
 # Global Config Singleton
 config = AppConfig()
+
+
+def print_startup_diagnostics() -> None:
+    """Prints a one-time startup diagnostic report to stdout for Streamlit Cloud log inspection."""
+    status = config.key_status()
+    print("=================== [DIAGNOSTIC STARTUP REPORT] ===================")
+    for key, is_active in status.items():
+        state_str = "RESOLVED (Active)" if is_active else "NOT RESOLVED (Missing / Default)"
+        print(f"[DIAGNOSTIC] {key}: {state_str}")
+    print(f"[DIAGNOSTIC] os.getenv('GEMINI_API_KEY'): {bool(os.getenv('GEMINI_API_KEY'))}")
+    print(f"[DIAGNOSTIC] os.getenv('GOOGLE_API_KEY'): {bool(os.getenv('GOOGLE_API_KEY'))}")
+    print("===================================================================")
+
+
+try:
+    print_startup_diagnostics()
+except Exception as _diag_err:
+    print(f"[DIAGNOSTIC] Startup report warning: {_diag_err}")
+

@@ -1,3 +1,5 @@
+import os
+import tempfile
 import math
 import logging
 import hashlib
@@ -14,8 +16,9 @@ try:
     from qdrant_client import QdrantClient
     from qdrant_client.models import Distance, VectorParams, PointStruct, Filter
     IS_QDRANT_STUB = False
-except ImportError:
+except ImportError as e:
     IS_QDRANT_STUB = True
+    print(f"[DEGRADED] QdrantClient: {type(e).__name__}: {e}")
     register_degraded_component("QdrantClient (stub)")
     
     class VectorParams:
@@ -93,7 +96,8 @@ except ImportError:
 # Rank-BM25 Sparse Retriever with fallback
 try:
     from rank_bm25 import BM25Okapi
-except ImportError:
+except ImportError as e:
+    print(f"[DEGRADED] BM25Okapi: {type(e).__name__}: {e}")
     register_degraded_component("BM25Okapi (stub)")
     class BM25Okapi:
         def __init__(self, corpus):
@@ -111,7 +115,8 @@ except ImportError:
 # FlashRank Cross-Encoder Reranker
 try:
     from flashrank import Ranker, RerankRequest
-except ImportError:
+except ImportError as e:
+    print(f"[DEGRADED] FlashRank Import: {type(e).__name__}: {e}")
     register_degraded_component("FlashRank (stub)")
     Ranker = None
     RerankRequest = None
@@ -120,7 +125,8 @@ except ImportError:
 # Google GenAI SDK
 try:
     from google import genai
-except ImportError:
+except ImportError as e:
+    print(f"[DEGRADED] Google GenAI Import: {type(e).__name__}: {e}")
     register_degraded_component("Gemini GenAI (stub)")
     genai = None
 
@@ -149,7 +155,9 @@ class HybridRetriever:
             try:
                 return genai.Client(api_key=config.GEMINI_API_KEY)
             except Exception as e:
-                logger.warning(f"GenAI client init error: {e}")
+                err_line = f"[DEGRADED] Gemini GenAI Client Init: {type(e).__name__}: {e}"
+                print(err_line)
+                logger.warning(err_line)
         return None
 
     def _init_qdrant(self) -> None:
@@ -169,7 +177,9 @@ class HybridRetriever:
 
             self._ensure_collection()
         except Exception as e:
-            logger.warning(f"Qdrant initialization error: {e}. Falling back to in-memory mode.")
+            err_line = f"[DEGRADED] Qdrant Cloud Connection: {type(e).__name__}: {e}"
+            print(err_line)
+            logger.warning(err_line)
             self.qdrant_client = QdrantClient(":memory:")
             register_degraded_component("Qdrant Local (:memory:)")
             self._ensure_collection()
@@ -193,15 +203,30 @@ class HybridRetriever:
             logger.warning(f"Qdrant collection creation notice: {e}")
 
     def _init_flashrank(self) -> None:
-        """Initializes FlashRank cross-encoder reranker."""
+        """Initializes FlashRank cross-encoder reranker with writable temp cache dir fallback."""
         if Ranker is not None:
             try:
-                self.flashrank_reranker = Ranker(model_name=config.FLASHRANK_MODEL)
+                cache_dir = os.path.join(tempfile.gettempdir(), "flashrank_cache")
+                os.makedirs(cache_dir, exist_ok=True)
+                
+                try:
+                    self.flashrank_reranker = Ranker(model_name=config.FLASHRANK_MODEL, cache_dir=cache_dir)
+                except TypeError:
+                    self.flashrank_reranker = Ranker(model_name=config.FLASHRANK_MODEL)
+
                 logger.info(f"Loaded FlashRank Reranker: {config.FLASHRANK_MODEL}")
+                clear_degraded_component("FlashRank (stub)")
             except Exception as e:
-                logger.warning(f"FlashRank initialization error: {e}. Will fallback to score ordering.")
+                err_line = f"[DEGRADED] FlashRank Reranker Init: {type(e).__name__}: {e}"
+                print(err_line)
+                logger.warning(err_line)
                 register_degraded_component("FlashRank (stub)")
                 self.flashrank_reranker = None
+        else:
+            err_line = "[DEGRADED] FlashRank Reranker: ImportError: flashrank package not installed"
+            print(err_line)
+            register_degraded_component("FlashRank (stub)")
+            self.flashrank_reranker = None
 
     def get_embedding(self, text: str) -> List[float]:
         """
@@ -222,7 +247,13 @@ class HybridRetriever:
                     clear_degraded_component("Gemini Embeddings (SHA256 fallback)")
                     return list(response.embeddings[0].values)
             except Exception as e:
-                logger.warning(f"Gemini embedding API call failed: {e}. Using deterministic SHA-256 fallback vector.")
+                err_line = f"[DEGRADED] Gemini Embeddings Call: {type(e).__name__}: {e}"
+                print(err_line)
+                logger.warning(err_line)
+        else:
+            err_line = "[DEGRADED] Gemini Embeddings Call: AuthError: GEMINI_API_KEY is missing or unresolved"
+            print(err_line)
+            logger.warning(err_line)
 
         # Stable, Process-Invariant SHA-256 Fallback Vector Generation
         register_degraded_component("Gemini Embeddings (SHA256 fallback)")
@@ -231,6 +262,7 @@ class HybridRetriever:
         vec = np.random.randn(config.EMBEDDING_DIM)
         norm = np.linalg.norm(vec)
         return (vec / norm).tolist()
+
 
     def build_index(self, chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
