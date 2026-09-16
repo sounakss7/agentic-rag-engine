@@ -1,3 +1,4 @@
+import os
 import time
 import streamlit as st
 import pandas as pd
@@ -153,7 +154,7 @@ with st.sidebar:
     st.caption("Enterprise Advanced Corrective RAG System")
     st.divider()
 
-    # --- Section 1: Key Status Indicators ---
+    # --- Section 1: Key Status Indicators & Configuration ---
     st.subheader("🔑 API Key Status")
     key_status = config.key_status()
 
@@ -169,6 +170,35 @@ with st.sidebar:
         st.markdown(f"**Qdrant:** {qdrant_mode}")
         st.markdown(f"**LangChain:** {'✅ Active' if key_status['LANGCHAIN_API_KEY'] else '⚪ Optional'}")
 
+    with st.expander("⚙️ Configure API Keys", expanded=not key_status["GEMINI_API_KEY"]):
+        st.caption("Enter API keys directly to activate live models, web fallback, or cloud vectors.")
+        gemini_input = st.text_input("Gemini API Key", value=config.GEMINI_API_KEY or "", type="password", help="From https://aistudio.google.com/")
+        tavily_input = st.text_input("Tavily API Key", value=config.TAVILY_API_KEY or "", type="password", help="From https://tavily.com/")
+        qdrant_url_input = st.text_input("Qdrant Cloud URL", value=config.QDRANT_URL or "", help="Optional cloud URL")
+        qdrant_key_input = st.text_input("Qdrant API Key", value=config.QDRANT_API_KEY or "", type="password", help="Optional cloud API key")
+
+        if st.button("💾 Apply Keys to Session", use_container_width=True):
+            if gemini_input.strip():
+                st.session_state["GEMINI_API_KEY"] = gemini_input.strip()
+                os.environ["GEMINI_API_KEY"] = gemini_input.strip()
+            if tavily_input.strip():
+                st.session_state["TAVILY_API_KEY"] = tavily_input.strip()
+                os.environ["TAVILY_API_KEY"] = tavily_input.strip()
+            if qdrant_url_input.strip():
+                st.session_state["QDRANT_URL"] = qdrant_url_input.strip()
+                os.environ["QDRANT_URL"] = qdrant_url_input.strip()
+            if qdrant_key_input.strip():
+                st.session_state["QDRANT_API_KEY"] = qdrant_key_input.strip()
+                os.environ["QDRANT_API_KEY"] = qdrant_key_input.strip()
+
+            # Refresh instances to use new credentials
+            st.session_state.retriever = HybridRetriever()
+            if st.session_state.indexed_chunks:
+                st.session_state.retriever.build_index(st.session_state.indexed_chunks)
+            st.session_state.crag_graph = CRAGGraph(st.session_state.retriever)
+            st.session_state.evaluator = RAGASEvaluator()
+            st.success("API keys applied successfully!")
+            st.rerun()
 
     st.divider()
 
@@ -188,6 +218,7 @@ with st.sidebar:
         all_chunks = []
         with st.spinner("Auto-parsing & indexing uploaded documents..."):
             for uf in uploaded_files:
+                uf.seek(0)
                 file_bytes = uf.read()
                 filename = uf.name
                 chunks, summary = st.session_state.ingestor.process_file(file_bytes, filename)
@@ -205,6 +236,7 @@ with st.sidebar:
             progress_bar = st.progress(0, text="Starting document parsing & OCR pipeline...")
             
             for idx, uf in enumerate(uploaded_files):
+                uf.seek(0)
                 file_bytes = uf.read()
                 filename = uf.name
                 progress_bar.progress(
@@ -308,7 +340,7 @@ with tab1:
         with st.chat_message("assistant"):
             with st.spinner("Orchestrating CRAG LangGraph Nodes (HyDE ➔ Hybrid Retrieval ➔ Context Grading ➔ Synthesis)..."):
                 start_t = time.time()
-                graph_output = st.session_state.crag_graph.run(user_query)
+                graph_output = st.session_state.crag_graph.run(user_query, chat_history=st.session_state.chat_history)
                 elapsed = round(time.time() - start_t, 2)
 
             ans_text = graph_output.get("generation", "No response generated.")

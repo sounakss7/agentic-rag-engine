@@ -58,7 +58,8 @@ except ImportError as e:
             self.store.extend(points)
 
         def search(self, collection_name, query_vector, limit=10):
-            return self.query_points(collection_name, query_vector, limit)
+            res = self.query_points(collection_name, query_vector, limit)
+            return getattr(res, 'points', res)
 
         def query_points(self, collection_name, query, limit=10):
             class Match:
@@ -66,9 +67,18 @@ except ImportError as e:
                     self.payload = payload
                     self.score = score
 
+            class Res:
+                def __init__(self, points=None):
+                    self.points = points or []
+                def __iter__(self):
+                    return iter(self.points)
+                def __len__(self):
+                    return len(self.points)
+                def __getitem__(self, idx):
+                    return self.points[idx]
+
             if not self.store or not query:
-                class Res: points = []
-                return Res()
+                return Res([])
 
             q_vec = np.array(query, dtype=float)
             q_norm = np.linalg.norm(q_vec)
@@ -87,10 +97,7 @@ except ImportError as e:
                 scored_points.append(Match(p.payload, cos_sim))
 
             scored_points.sort(key=lambda x: x.score, reverse=True)
-
-            class Res:
-                points = scored_points[:limit]
-            return Res()
+            return Res(scored_points[:limit])
 
 
 # Rank-BM25 Sparse Retriever with fallback
@@ -125,10 +132,12 @@ except ImportError as e:
 # Google GenAI SDK
 try:
     from google import genai
+    from google.genai import types
 except ImportError as e:
     print(f"[DEGRADED] Google GenAI Import: {type(e).__name__}: {e}")
     register_degraded_component("Gemini GenAI (stub)")
     genai = None
+    types = None
 
 
 class HybridRetriever:
@@ -164,10 +173,17 @@ class HybridRetriever:
         """Initializes Qdrant client (Cloud or In-Memory fallback)."""
         try:
             if config.QDRANT_URL and config.QDRANT_API_KEY and not IS_QDRANT_STUB:
-                self.qdrant_client = QdrantClient(
-                    url=config.QDRANT_URL,
-                    api_key=config.QDRANT_API_KEY
-                )
+                try:
+                    self.qdrant_client = QdrantClient(
+                        url=config.QDRANT_URL,
+                        api_key=config.QDRANT_API_KEY,
+                        check_compatibility=False
+                    )
+                except TypeError:
+                    self.qdrant_client = QdrantClient(
+                        url=config.QDRANT_URL,
+                        api_key=config.QDRANT_API_KEY
+                    )
                 logger.info(f"Connected to Qdrant Cloud at {config.QDRANT_URL}")
             else:
                 self.qdrant_client = QdrantClient(":memory:")
@@ -211,10 +227,11 @@ class HybridRetriever:
                 
                 try:
                     self.flashrank_reranker = Ranker(model_name=config.FLASHRANK_MODEL, cache_dir=cache_dir)
-                except TypeError:
-                    self.flashrank_reranker = Ranker(model_name=config.FLASHRANK_MODEL)
+                except Exception as model_err:
+                    logger.info(f"Trying default FlashRank model fallback: {model_err}")
+                    self.flashrank_reranker = Ranker(cache_dir=cache_dir)
 
-                logger.info(f"Loaded FlashRank Reranker: {config.FLASHRANK_MODEL}")
+                logger.info("Loaded FlashRank Reranker successfully.")
                 clear_degraded_component("FlashRank (stub)")
             except Exception as e:
                 err_line = f"[DEGRADED] FlashRank Reranker Init: {type(e).__name__}: {e}"
@@ -236,9 +253,11 @@ class HybridRetriever:
         client = self._get_genai_client()
         if client:
             try:
+                emb_cfg = types.EmbedContentConfig(output_dimensionality=config.EMBEDDING_DIM) if types else None
                 response = client.models.embed_content(
                     model=config.EMBEDDING_MODEL,
-                    contents=text
+                    contents=text,
+                    config=emb_cfg
                 )
                 if hasattr(response, 'embedding') and hasattr(response.embedding, 'values'):
                     clear_degraded_component("Gemini Embeddings (SHA256 fallback)")
@@ -263,10 +282,53 @@ class HybridRetriever:
         norm = np.linalg.norm(vec)
         return (vec / norm).tolist()
 
+    def get_embeddings_batch(self, texts: List[str]) -> List[List[float]]:
+        """
+        Generates 768-dimensional embeddings for a batch of texts.
+        Optimized to reduce HTTP connection overhead and avoid rate limits.
+        """
+        if not texts:
+            return []
+
+        client = self._get_genai_client()
+        embeddings: List[List[float]] = []
+
+        if client:
+            batch_size = 32
+            emb_cfg = types.EmbedContentConfig(output_dimensionality=config.EMBEDDING_DIM) if types else None
+            for i in range(0, len(texts), batch_size):
+                batch = texts[i:i + batch_size]
+                try:
+                    response = client.models.embed_content(
+                        model=config.EMBEDDING_MODEL,
+                        contents=batch,
+                        config=emb_cfg
+                    )
+                    batch_embs = []
+                    if hasattr(response, 'embeddings') and response.embeddings:
+                        for emb in response.embeddings:
+                            batch_embs.append(list(emb.values))
+                    elif hasattr(response, 'embedding') and hasattr(response.embedding, 'values'):
+                        batch_embs.append(list(response.embedding.values))
+                    
+                    if len(batch_embs) == len(batch):
+                        clear_degraded_component("Gemini Embeddings (SHA256 fallback)")
+                        embeddings.extend(batch_embs)
+                        continue
+                except Exception as e:
+                    logger.warning(f"Batch embedding failed ({e}), falling back to individual calls.")
+
+                # Fallback for this batch if batch API call failed
+                for text in batch:
+                    embeddings.append(self.get_embedding(text))
+            return embeddings
+
+        # Fallback if no Gemini client
+        return [self.get_embedding(t) for t in texts]
 
     def build_index(self, chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
-        Indexes chunks into both BM25 and Qdrant Vector Store.
+        Indexes chunks into both BM25 and Qdrant Vector Store using batched embedding generation.
         """
         self.chunks = chunks
         if not chunks:
@@ -275,6 +337,9 @@ class HybridRetriever:
         # 1. Build Sparse BM25 Index
         corpus_tokens = [chunk["content"].lower().split() for chunk in chunks]
         self.bm25 = BM25Okapi(corpus_tokens)
+        if hasattr(self.bm25, 'idf'):
+            # Enforce non-negative IDF floor (Lucene-style BM25 smoothing) so small corpora don't zero out valid keyword hits
+            self.bm25.idf = {k: max(v, 0.25) for k, v in self.bm25.idf.items()}
 
         # 2. Build Qdrant Dense Index
         self._ensure_collection()
@@ -290,9 +355,13 @@ class HybridRetriever:
         except Exception:
             pass
 
+        # Generate embeddings in efficient batches
+        contents = [c["content"] for c in chunks]
+        embeddings = self.get_embeddings_batch(contents)
+
         points = []
         for idx, chunk in enumerate(chunks):
-            embedding = self.get_embedding(chunk["content"])
+            embedding = embeddings[idx] if idx < len(embeddings) else self.get_embedding(chunk["content"])
             points.append(PointStruct(
                 id=idx,
                 vector=embedding,
@@ -303,7 +372,7 @@ class HybridRetriever:
                 }
             ))
 
-        # Upload points
+        # Upload points in batches
         batch_size = 64
         for i in range(0, len(points), batch_size):
             self.qdrant_client.upsert(
@@ -319,7 +388,7 @@ class HybridRetriever:
         }
 
     def sparse_search(self, query: str, top_k: int = 10) -> List[Dict[str, Any]]:
-        """BM25 keyword search."""
+        """BM25 keyword search using clean query terms."""
         if not self.bm25 or not self.chunks:
             return []
         
@@ -352,23 +421,27 @@ class HybridRetriever:
         retrieval_mode = "stub" if IS_QDRANT_STUB else ("cloud" if config.QDRANT_URL else "memory")
 
         try:
-            if hasattr(self.qdrant_client, 'search'):
-                search_result = self.qdrant_client.search(
-                    collection_name=config.QDRANT_COLLECTION,
-                    query_vector=query_vector,
-                    limit=top_k
-                )
-            elif hasattr(self.qdrant_client, 'query_points'):
+            search_result = []
+            if hasattr(self.qdrant_client, 'query_points'):
                 res = self.qdrant_client.query_points(
                     collection_name=config.QDRANT_COLLECTION,
                     query=query_vector,
                     limit=top_k
                 )
-                search_result = getattr(res, 'points', [])
-            else:
-                search_result = []
+                search_result = getattr(res, 'points', res)
+            elif hasattr(self.qdrant_client, 'search'):
+                res = self.qdrant_client.search(
+                    collection_name=config.QDRANT_COLLECTION,
+                    query_vector=query_vector,
+                    limit=top_k
+                )
+                search_result = getattr(res, 'points', res)
 
-            for rank, point in enumerate(search_result):
+            # Safeguard: ensure search_result is iterable
+            if hasattr(search_result, 'points'):
+                search_result = search_result.points
+
+            for rank, point in enumerate(search_result or []):
                 payload = getattr(point, 'payload', {}) or {}
                 score = getattr(point, 'score', 0.85)
                 results.append({
@@ -384,6 +457,7 @@ class HybridRetriever:
             logger.warning(f"Dense vector search warning: {e}")
 
         return results
+
 
     def reciprocal_rank_fusion(
         self,
@@ -457,13 +531,14 @@ class HybridRetriever:
             item["rerank_score"] = item.get("rrf_score", 0.5)
         return candidates[:top_n]
 
-    def search(self, query: str, top_n: int = 3) -> List[Dict[str, Any]]:
+    def search(self, query: str, top_n: int = 3, dense_query: Optional[str] = None) -> List[Dict[str, Any]]:
         """
         Full Hybrid Retrieval Pipeline:
-        Sparse (BM25) + Dense (Qdrant) -> RRF Fusion -> FlashRank Rerank
+        Sparse (BM25 with exact query keywords) + Dense (Qdrant with dense_query or query) -> RRF Fusion -> FlashRank Rerank (with original query)
         """
         sparse_res = self.sparse_search(query, top_k=config.TOP_K_SPARSE)
-        dense_res = self.dense_search(query, top_k=config.TOP_K_DENSE)
+        target_dense_query = dense_query if dense_query and dense_query.strip() else query
+        dense_res = self.dense_search(target_dense_query, top_k=config.TOP_K_DENSE)
         fused_res = self.reciprocal_rank_fusion(sparse_res, dense_res, k=config.RRF_K, top_n=10)
         final_reranked = self.flashrank_rerank(query, fused_res, top_n=top_n)
         return final_reranked

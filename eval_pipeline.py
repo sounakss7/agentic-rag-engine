@@ -1,7 +1,7 @@
 import time
 import json
 import logging
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 import pandas as pd
 try:
     from google import genai
@@ -24,12 +24,16 @@ class RAGASEvaluator:
     """
 
     def __init__(self):
-        self.client: Optional[genai.Client] = None
-        if config.GEMINI_API_KEY:
+        pass
+
+    def _get_client(self) -> Optional[Any]:
+        """Dynamically retrieves GenAI client using active GEMINI_API_KEY."""
+        if genai is not None and config.GEMINI_API_KEY:
             try:
-                self.client = genai.Client(api_key=config.GEMINI_API_KEY)
+                return genai.Client(api_key=config.GEMINI_API_KEY)
             except Exception as e:
                 logger.warning(f"RAGASEvaluator GenAI init warning: {e}")
+        return None
 
     def evaluate_response(
         self,
@@ -63,67 +67,74 @@ class RAGASEvaluator:
 
     def _eval_faithfulness(self, generation: str, contexts: List[str]) -> float:
         """Evaluates if generation is grounded in contexts."""
-        if not self.client:
-            # Fallback text overlap heuristic
-            gen_words = set(generation.lower().split())
-            ctx_words = set(" ".join(contexts).lower().split())
-            if not gen_words:
-                return 0.0
-            overlap = len(gen_words.intersection(ctx_words))
-            return min(1.0, round(overlap / len(gen_words) + 0.3, 2))
-
-        combined_ctx = "\n".join(f"- {c}" for c in contexts)
-        prompt = (
-            f"You are a strict RAG Faithfulness Evaluator.\n"
-            f"Evaluate if every statement in the Generated Answer is fully supported by the Context.\n"
-            f"Context:\n{combined_ctx}\n\n"
-            f"Generated Answer:\n{generation}\n\n"
-            f"Respond in JSON format with keys:\n"
-            f'{{"faithfulness_score": <float between 0.0 and 1.0>, "reason": "<short description>"}}'
-        )
-
-        try:
-            res = self.client.models.generate_content(
-                model=config.LLM_MODEL,
-                contents=prompt,
+        client = self._get_client()
+        if client:
+            combined_ctx = "\n".join(f"- {c}" for c in contexts)
+            prompt = (
+                f"You are a strict RAG Faithfulness Evaluator.\n"
+                f"Evaluate if every statement in the Generated Answer is fully supported by the Context.\n"
+                f"Context:\n{combined_ctx}\n\n"
+                f"Generated Answer:\n{generation}\n\n"
+                f"Respond in JSON format with keys:\n"
+                f'{{"faithfulness_score": <float between 0.0 and 1.0>, "reason": "<short description>"}}'
             )
-            parsed = json.loads(res.text.strip().replace("```json", "").replace("```", ""))
-            return float(parsed.get("faithfulness_score", 0.85))
-        except Exception as e:
-            logger.warning(f"Faithfulness eval LLM parse error: {e}")
-            return 0.85
+
+            try:
+                res = client.models.generate_content(
+                    model=config.LLM_MODEL,
+                    contents=prompt,
+                )
+                clean_text = res.text.strip().replace("```json", "").replace("```", "")
+                parsed = json.loads(clean_text)
+                return round(float(parsed.get("faithfulness_score", 0.7)), 2)
+            except Exception as e:
+                logger.warning(f"Faithfulness eval LLM parse error: {e}. Using heuristic overlap.")
+
+        # Fallback text overlap heuristic
+        gen_words = set(generation.lower().split())
+        ctx_words = set(" ".join(contexts).lower().split())
+        if not gen_words:
+            return 0.0
+        overlap = len(gen_words.intersection(ctx_words))
+        return min(1.0, round(overlap / len(gen_words), 2))
 
     def _eval_context_precision(self, query: str, contexts: List[str]) -> float:
         """Evaluates precision of retrieved context chunks relative to query."""
-        if not self.client:
-            query_words = set(query.lower().split())
-            rel_chunks = 0
-            for c in contexts:
-                c_words = set(c.lower().split())
-                if len(query_words.intersection(c_words)) > 0:
-                    rel_chunks += 1
-            return round(rel_chunks / max(1, len(contexts)), 2)
-
-        combined_ctx = "\n".join(f"Chunk {i+1}: {c}" for i, c in enumerate(contexts))
-        prompt = (
-            f"You are a Context Precision Evaluator.\n"
-            f"Determine what percentage of the retrieved chunks contain relevant signal to answer the question.\n"
-            f"Question: {query}\n\n"
-            f"Retrieved Chunks:\n{combined_ctx}\n\n"
-            f"Respond in JSON format with keys:\n"
-            f'{{"precision_score": <float between 0.0 and 1.0>, "reason": "<short description>"}}'
-        )
-
-        try:
-            res = self.client.models.generate_content(
-                model=config.LLM_MODEL,
-                contents=prompt,
+        client = self._get_client()
+        if client:
+            combined_ctx = "\n".join(f"Chunk {i+1}: {c}" for i, c in enumerate(contexts))
+            prompt = (
+                f"You are a Context Precision Evaluator.\n"
+                f"Determine what percentage of the retrieved chunks contain relevant signal to answer the question.\n"
+                f"Question: {query}\n\n"
+                f"Retrieved Chunks:\n{combined_ctx}\n\n"
+                f"Respond in JSON format with keys:\n"
+                f'{{"precision_score": <float between 0.0 and 1.0>, "reason": "<short description>"}}'
             )
-            parsed = json.loads(res.text.strip().replace("```json", "").replace("```", ""))
-            return float(parsed.get("precision_score", 0.80))
-        except Exception as e:
-            logger.warning(f"Context precision LLM parse error: {e}")
-            return 0.80
+
+            try:
+                res = client.models.generate_content(
+                    model=config.LLM_MODEL,
+                    contents=prompt,
+                )
+                clean_text = res.text.strip().replace("```json", "").replace("```", "")
+                parsed = json.loads(clean_text)
+                return round(float(parsed.get("precision_score", 0.7)), 2)
+            except Exception as e:
+                logger.warning(f"Context precision LLM parse error: {e}. Using heuristic overlap.")
+
+        # Fallback keyword overlap heuristic
+        stop_words = {"what", "is", "the", "a", "an", "of", "in", "to", "for", "and", "on", "at", "by", "with"}
+        query_words = set(w for w in query.lower().split() if w not in stop_words)
+        if not query_words:
+            query_words = set(query.lower().split())
+
+        rel_chunks = 0
+        for c in contexts:
+            c_words = set(c.lower().split())
+            if len(query_words.intersection(c_words)) > 0:
+                rel_chunks += 1
+        return round(rel_chunks / max(1, len(contexts)), 2)
 
     def run_benchmark_suite(
         self,
@@ -174,14 +185,19 @@ class RAGASEvaluator:
         degraded = is_degraded_mode()
         active_stubs = get_degraded_components()
 
+        avg_faith = round(total_faith / num_cases, 3)
+        avg_prec = round(total_prec / num_cases, 3)
+        harmonic_ragas = round((2 * avg_faith * avg_prec) / max(0.001, (avg_faith + avg_prec)), 3)
+
         summary = {
-            "avg_faithfulness": round(total_faith / num_cases, 3),
-            "avg_precision": round(total_prec / num_cases, 3),
-            "avg_ragas_score": round((total_faith + total_prec) / (2 * num_cases), 3),
+            "avg_faithfulness": avg_faith,
+            "avg_precision": avg_prec,
+            "avg_ragas_score": harmonic_ragas,
             "avg_latency_s": round(total_latency / num_cases, 2),
             "degraded_mode": degraded,
             "degraded_components": active_stubs
         }
+
 
         if degraded:
             logger.warning(f"RAGAS Benchmark executed in DEGRADED MODE. Active stubs: {', '.join(active_stubs)}")

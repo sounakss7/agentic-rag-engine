@@ -77,10 +77,18 @@ def get_secret(key_name: str, default: Optional[str] = None) -> Optional[str]:
                             val = str(sec[alias]).strip()
                             if val:
                                 return val
+
+        # 2. Check Streamlit session_state for keys entered via UI
+        if hasattr(st, "session_state") and st.session_state is not None:
+            for alias in aliases:
+                if alias in st.session_state and st.session_state[alias]:
+                    val = str(st.session_state[alias]).strip()
+                    if val:
+                        return val
     except Exception:
         pass
 
-    # 2. Check environment variables
+    # 3. Check environment variables
     for alias in aliases:
         env_val = os.getenv(alias)
         if env_val and str(env_val).strip():
@@ -94,7 +102,7 @@ class AppConfig:
     """Central configuration for Advanced CRAG Engine."""
     # LLM & Embeddings Settings
     LLM_MODEL: str = "gemini-2.5-flash"
-    EMBEDDING_MODEL: str = "text-embedding-004"
+    EMBEDDING_MODEL: str = "gemini-embedding-001"
     EMBEDDING_DIM: int = 768
 
     # Chunking Parameters
@@ -107,7 +115,7 @@ class AppConfig:
     TOP_K_SPARSE: int = 10
     TOP_K_DENSE: int = 10
     TOP_N_RERANK: int = 3
-    FLASHRANK_MODEL: str = "ms-marco-MiniLM-L-6-v2"
+    FLASHRANK_MODEL: str = "ms-marco-TinyBERT-L-2-v2"
 
     # CRAG Evaluation Thresholds
     RELEVANCE_THRESHOLD: float = 0.6

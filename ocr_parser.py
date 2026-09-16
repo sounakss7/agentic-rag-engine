@@ -2,7 +2,11 @@ import io
 import uuid
 import logging
 from typing import List, Dict, Any, Tuple
-from PIL import Image
+try:
+    from PIL import Image
+except ImportError:
+    Image = None
+
 
 # Import document splitters with fallback
 try:
@@ -147,8 +151,9 @@ class DocumentIngestor:
         else:
             needs_ocr_pages = [1]  # Fallback to OCR if native failed entirely
 
-        # 2. OCR Fallback for scanned pages using pdf2image + pytesseract
-        if needs_ocr_pages and convert_from_bytes is not None and pytesseract is not None:
+        # 2. OCR Fallback for scanned/image pages
+        ocr_succeeded_pages = set()
+        if needs_ocr_pages and convert_from_bytes is not None:
             try:
                 images = convert_from_bytes(file_bytes)
                 for page_num in needs_ocr_pages:
@@ -161,31 +166,61 @@ class DocumentIngestor:
                                 "text": ocr_text.strip(),
                                 "ocr_used": True
                             })
-                        else:
-                            # Retain existing minimal text if OCR returned empty
-                            existing_text = next((t for p, t in text_by_page if p == page_num), "")
-                            pages_data.append({
-                                "page": page_num,
-                                "text": existing_text or f"[Page {page_num}: No readable text found]",
-                                "ocr_used": False
-                            })
+                            ocr_succeeded_pages.add(page_num)
             except Exception as e:
-                logger.warning(f"PDF OCR conversion failed: {e}")
-                # If OCR fails (e.g., poppler/tesseract not installed), fallback to whatever text was found
-                for page_num in needs_ocr_pages:
-                    existing_text = next((t for p, t in text_by_page if p == page_num), "")
-                    pages_data.append({
-                        "page": page_num,
-                        "text": existing_text or f"[Page {page_num}: Unreadable content]",
-                        "ocr_used": False
-                    })
+                logger.warning(f"Local PDF image rendering / OCR failed: {e}")
+
+        # 3. Direct Gemini Multimodal PDF Fallback if local OCR didn't process all needed pages
+        unresolved_pages = [p for p in needs_ocr_pages if p not in ocr_succeeded_pages]
+        if unresolved_pages:
+            try:
+                from google import genai
+                from google.genai import types
+                from config import config
+                if genai is not None and config.GEMINI_API_KEY:
+                    client = genai.Client(api_key=config.GEMINI_API_KEY)
+                    res = client.models.generate_content(
+                        model=config.LLM_MODEL,
+                        contents=[
+                            types.Part.from_bytes(data=file_bytes, mime_type="application/pdf"),
+                            "Extract all text from this PDF document thoroughly and accurately. Maintain page boundaries if visible."
+                        ]
+                    )
+                    if res and res.text and res.text.strip():
+                        extracted_full = res.text.strip()
+                        for p_num in unresolved_pages:
+                            pages_data.append({
+                                "page": p_num,
+                                "text": extracted_full,
+                                "ocr_used": True
+                            })
+                            ocr_succeeded_pages.add(p_num)
+            except Exception as gemini_err:
+                logger.warning(f"Gemini native PDF OCR fallback notice: {gemini_err}")
+
+        # 4. Final safety guarantee: Ensure no page is dropped
+        for page_num in needs_ocr_pages:
+            if page_num not in ocr_succeeded_pages and not any(p["page"] == page_num for p in pages_data):
+                existing_text = next((t for p, t in text_by_page if p == page_num), "")
+                pages_data.append({
+                    "page": page_num,
+                    "text": existing_text or f"[Page {page_num}: No readable text found]",
+                    "ocr_used": False
+                })
 
         # Ensure pages are sorted by page number
         pages_data.sort(key=lambda x: x["page"])
         return pages_data
 
     def _parse_image(self, file_bytes: bytes, filename: str) -> List[Dict[str, Any]]:
-        """Extracts text from images using PyTesseract OCR."""
+        """Extracts text from images using PyTesseract OCR or Gemini Vision OCR."""
+        if Image is None:
+            return [{
+                "page": 1,
+                "text": f"[Error processing image {filename}: Pillow package is not installed]",
+                "ocr_used": False
+            }]
+
         try:
             image = Image.open(io.BytesIO(file_bytes))
             ocr_text = self._ocr_image(image)
@@ -202,8 +237,12 @@ class DocumentIngestor:
                 "ocr_used": False
             }]
 
-    def _ocr_image(self, image: Image.Image) -> str:
+    def _ocr_image(self, image: Any) -> str:
         """Helper to run PyTesseract with fallback to Gemini 2.5 Flash Vision OCR."""
+        if image is None:
+            return ""
+
+        # Tier 1: Local Tesseract OCR
         if pytesseract is not None:
             try:
                 text = pytesseract.image_to_string(image)
@@ -212,7 +251,7 @@ class DocumentIngestor:
             except Exception as e:
                 logger.warning(f"Tesseract OCR execution warning: {e}")
 
-        # Gemini 2.5 Flash Multimodal Vision OCR Fallback
+        # Tier 2: Gemini Multimodal Vision OCR Fallback
         try:
             from google import genai
             from google.genai import types
@@ -220,7 +259,9 @@ class DocumentIngestor:
             if genai is not None and config.GEMINI_API_KEY:
                 client = genai.Client(api_key=config.GEMINI_API_KEY)
                 img_byte_arr = io.BytesIO()
-                image.save(img_byte_arr, format='JPEG')
+                # Ensure RGBA / transparent images are converted to RGB before saving as JPEG
+                save_img = image.convert("RGB") if hasattr(image, "mode") and image.mode in ("RGBA", "P", "LA") else image
+                save_img.save(img_byte_arr, format='JPEG')
                 img_bytes = img_byte_arr.getvalue()
 
                 res = client.models.generate_content(
@@ -236,6 +277,7 @@ class DocumentIngestor:
             logger.warning(f"Gemini Vision OCR fallback warning: {e}")
 
         return ""
+
 
 
     def _parse_text(self, file_bytes: bytes, filename: str) -> List[Dict[str, Any]]:
