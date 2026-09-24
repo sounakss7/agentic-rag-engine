@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  nexus-backend:
+    build: .
+    container_name: nexusrag-backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    command: uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --reload
+    volumes:
+      - .:/app
+    restart: unless-stopped
+
+  nexus-dashboard:
+    build: .
+    container_name: nexusrag-dashboard
+    ports:
+      - "8501:8501"
+    env_file:
+      - .env
+    command: streamlit run app.py --server.port 8501 --server.address 0.0.0.0
+    volumes:
+      - .:/app
+    depends_on:
+      - nexus-backend
+    restart: unless-stopped
