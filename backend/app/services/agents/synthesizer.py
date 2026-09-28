@@ -125,3 +125,102 @@ class AnswerSynthesizer:
             + (f"\n\n**Calculations:**\n```\n{code_result}\n```\n" if code_result else "")
         )
         return fallback_text, citations, confidence
+
+    def stream_synthesize_response(
+        self,
+        query: str,
+        chat_history: List[Dict[str, Any]],
+        context_chunks: List[Dict[str, Any]],
+        graph_facts: List[Dict[str, Any]],
+        code_result: Optional[str] = None,
+        critic_feedback: Optional[str] = None
+    ) -> Tuple[Any, List[Dict[str, Any]], float]:
+        """
+        Generates real-time token stream from Gemini streaming API.
+        Returns:
+            Tuple of (token_generator, citations_list, confidence_score)
+        """
+        citations = []
+        context_blocks = []
+        total_score = 0.0
+
+        for idx, doc in enumerate(context_chunks):
+            src = doc.get("metadata", {}).get("source", f"Document-{idx+1}")
+            page = doc.get("metadata", {}).get("page", 1)
+            content = doc.get("parent_content") or doc.get("content", "")
+            context_blocks.append(f"--- [Source {idx+1}: {src} (Page {page})] ---\n{content}\n")
+            citations.append({
+                "citation_index": idx + 1,
+                "source": src,
+                "page": page,
+                "snippet": content[:300],
+                "url": doc.get("metadata", {}).get("url", "")
+            })
+            total_score += doc.get("relevance_score", 0.8)
+
+        graph_str = ""
+        if graph_facts:
+            graph_lines = [f"- {gf['content']}" for gf in graph_facts]
+            graph_str = "\n[Knowledge Graph Relational Context]:\n" + "\n".join(graph_lines) + "\n\n"
+
+        code_str = ""
+        if code_result:
+            code_str = f"\n[Deterministic Python Sandbox Calculation Results]:\n{code_result}\n\n"
+
+        history_str = ""
+        if chat_history:
+            turns = chat_history[-3:]
+            history_str = "Prior Dialogue:\n" + "\n".join([f"{m.get('role', 'user').title()}: {m.get('content', '')}" for m in turns]) + "\n\n"
+
+        refinement_note = f"\nCRITIC FEEDBACK TO ADDRESS:\n{critic_feedback}\n" if critic_feedback else ""
+        confidence = round(total_score / max(1, len(context_chunks)), 2) if context_chunks else 0.0
+        client = self._get_genai_client()
+
+        if not context_blocks:
+            def empty_gen():
+                yield f"No verified information regarding '{query}' was found in the indexed documents or external fallback. Please upload relevant reference files."
+            return empty_gen(), [], 0.0
+
+        prompt = (
+            "You are NexusRAG, an enterprise principal research intelligence system.\n"
+            "Provide a comprehensive, authoritative, and strictly grounded answer to the user's question.\n"
+            "Requirements:\n"
+            "1. Cite sources with explicit numerical brackets matching context chunks, e.g. [1], [2].\n"
+            "2. If Python sandbox calculation results are provided, cite the exact numbers from the sandbox.\n"
+            "3. If tables or financial metrics are present, preserve clean formatting.\n"
+            "4. Do NOT invent claims outside the context.\n\n"
+            f"{history_str}"
+            f"User Question: {query}\n\n"
+            f"Context Chunks:\n{''.join(context_blocks)}\n"
+            f"{graph_str}"
+            f"{code_str}"
+            f"{refinement_note}"
+            "Comprehensive Answer:"
+        )
+
+        def token_stream_generator():
+            if client:
+                for model_name in settings.CASCADE_MODELS:
+                    try:
+                        stream = client.models.generate_content_stream(
+                            model=model_name,
+                            contents=prompt
+                        )
+                        for chunk in stream:
+                            if chunk and chunk.text:
+                                yield chunk.text
+                        return
+                    except Exception as e:
+                        if "429" in str(e):
+                            continue
+                        logger.warning(f"Streaming error on {model_name}: {e}")
+                        break
+
+            # Fallback generator
+            yield f"### Synthesized Answer for: {query}\n\n"
+            for b in context_blocks[:2]:
+                yield b
+            if code_result:
+                yield f"\n\n**Calculations:**\n```\n{code_result}\n```\n"
+
+        return token_stream_generator(), citations, confidence

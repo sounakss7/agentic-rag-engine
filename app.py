@@ -176,7 +176,28 @@ tab_chat, tab_graph, tab_inspector, tab_ragas = st.tabs([
 # ----------------- TAB 1: CHAT -----------------
 with tab_chat:
     st.markdown("### 🧠 NexusRAG Autonomous Research Interface")
-    st.markdown("Performs query decomposition, dual Graph + Vector retrieval, deterministic code execution, and citation critique.")
+    st.markdown("Autonomous query decomposition, concurrent multi-source retrieval, deterministic code execution, and real-time token streaming.")
+
+    # Specialist Engine Selector Controls
+    col_s1, col_s2 = st.columns([3, 1])
+    with col_s1:
+        selected_specialists = st.multiselect(
+            "⚡ Active Research Specialist Engines (Run Simultaneously in Parallel)",
+            options=["vector", "graph", "web", "code"],
+            default=["vector", "graph"],
+            format_func=lambda x: {
+                "vector": "⚡ Vector Store (Qdrant Dense + BM25)",
+                "graph": "🕸️ GraphRAG (Knowledge Graph Subgraphs)",
+                "web": "🌐 Live Web Grounding (Tavily Search Engine)",
+                "code": "🐍 Python Sandbox (Deterministic Calculations)"
+            }[x],
+            help="Select 2 or more specialist engines to trigger simultaneous parallel execution!"
+        )
+    with col_s2:
+        if len(selected_specialists) > 1:
+            st.success(f"🚀 **Parallel Mode:** {len(selected_specialists)} specialists run simultaneously!")
+        else:
+            st.info("Single specialist active.")
 
     # Render History
     for msg in st.session_state.chat_history:
@@ -184,12 +205,19 @@ with tab_chat:
             st.markdown(msg["content"])
             if "source_type" in msg:
                 badge_class = "badge-qdrant" if "Qdrant" in msg["source_type"] else "badge-web"
-                st.markdown(f"<span class='{badge_class}'>{msg['source_type']}</span> &nbsp; Confidence: **{msg.get('confidence_score', 0)*100:.0f}%**", unsafe_allow_html=True)
+                lat_str = f" | Latency: **{msg['latency']}s**" if "latency" in msg else ""
+                st.markdown(f"<span class='{badge_class}'>{msg['source_type']}</span> &nbsp; Confidence: **{msg.get('confidence_score', 0)*100:.0f}%**{lat_str}", unsafe_allow_html=True)
 
             if msg.get("code_result"):
                 with st.expander("🐍 Executed Python Sandbox Calculation"):
                     st.code(msg.get("code_snippet", ""), language="python")
                     st.info(f"**Output:**\n{msg['code_result']}")
+
+            if msg.get("citations"):
+                with st.expander(f"📚 Verified Sources & Citations ({len(msg['citations'])})"):
+                    for c in msg["citations"]:
+                        st.markdown(f"**[{c['citation_index']}] {c['source']} (Page {c['page']})**")
+                        st.caption(f"{c['snippet']}...")
 
             if msg.get("node_trace"):
                 with st.expander("🔍 Multi-Agent Execution Trace"):
@@ -197,7 +225,7 @@ with tab_chat:
                         st.text(tr)
 
     # Chat Input
-    query = st.chat_input("Ask a complex question, comparative query, or quantitative problem...")
+    query = st.chat_input("Ask a question, document summary, comparative query, or quantitative problem...")
 
     if query:
         # User message
@@ -205,25 +233,46 @@ with tab_chat:
         with st.chat_message("user"):
             st.markdown(query)
 
-        # Agent execution
+        # Agent execution with real-time status and token streaming
         with st.chat_message("assistant"):
-            with st.spinner("Master Planner decomposing query and dispatching specialist agents..."):
-                start_time = time.time()
-                result = st.session_state.orchestrator.run(
+            status_box = st.status("⚡ Dispatching NexusRAG Multi-Agent Orchestrator...", expanded=True)
+            response_placeholder = st.empty()
+            streamed_text = ""
+            final_data = {}
+            start_time = time.time()
+
+            try:
+                for event in st.session_state.orchestrator.run_stream(
                     query=query,
+                    enabled_specialists=selected_specialists,
                     chat_history=st.session_state.chat_history
-                )
+                ):
+                    if event["type"] == "status":
+                        status_box.write(event["message"])
+                    elif event["type"] == "token":
+                        streamed_text += event["content"]
+                        response_placeholder.markdown(streamed_text + "▌")
+                    elif event["type"] == "final_result":
+                        final_data = event["data"]
+
                 latency = round(time.time() - start_time, 2)
+                num_specs = len(selected_specialists)
+                spec_label = f"{num_specs} specialists simultaneously in parallel" if num_specs > 1 else "specialist"
+                status_box.update(
+                    label=f"✅ Research Completed in {latency}s ({spec_label})",
+                    state="complete",
+                    expanded=False
+                )
 
-                final_text = result.get("final_answer", "")
-                src_type = result.get("source_type", "NexusRAG Multi-Source")
-                conf = result.get("confidence_score", 0.0)
-                code_snippet = result.get("code_generated")
-                code_out = result.get("code_execution_result")
-                trace = result.get("node_trace", [])
-                citations = result.get("citations", [])
+                final_text = final_data.get("final_answer", streamed_text)
+                response_placeholder.markdown(final_text)
 
-                st.markdown(final_text)
+                src_type = final_data.get("source_type", "NexusRAG Multi-Source")
+                conf = final_data.get("confidence_score", 0.0)
+                code_snippet = final_data.get("code_generated")
+                code_out = final_data.get("code_execution_result")
+                trace = final_data.get("node_trace", [])
+                citations = final_data.get("citations", [])
 
                 badge_class = "badge-qdrant" if "Qdrant" in src_type else "badge-web"
                 st.markdown(f"<span class='{badge_class}'>{src_type}</span> &nbsp; Confidence: **{conf*100:.0f}%** | Latency: **{latency}s**", unsafe_allow_html=True)
@@ -251,11 +300,16 @@ with tab_chat:
                     "content": final_text,
                     "source_type": src_type,
                     "confidence_score": conf,
+                    "latency": latency,
                     "code_snippet": code_snippet,
                     "code_result": code_out,
                     "node_trace": trace,
                     "citations": citations
                 })
+
+            except Exception as ex:
+                status_box.update(label=f"❌ Error during execution: {ex}", state="error", expanded=True)
+                st.error(f"Execution failed: {ex}")
 
 
 # ----------------- TAB 2: KNOWLEDGE GRAPH -----------------

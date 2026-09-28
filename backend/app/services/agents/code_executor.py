@@ -45,6 +45,15 @@ class CodeExecutionSandbox:
         """
         Uses LLM to write clean Python script utilizing pandas/numpy to compute numerical answer.
         """
+        # Guard: Only invoke LLM if query and context contain numeric content and calculation keywords
+        calc_triggers = ["calculate", "compute", "sum", "average", "ratio", "difference", "growth", "margin", "%", "percent", "divide", "multiply"]
+        if not any(t in query.lower() for t in calc_triggers):
+            return None
+
+        has_digits = any(c.isdigit() for c in query) or any(any(char.isdigit() for char in c.get('content', '')) for c in context_chunks)
+        if not has_digits:
+            return None
+
         client = self._get_genai_client()
         if not client:
             return None

@@ -34,9 +34,9 @@ class Settings(BaseSettings):
     DEBUG: bool = False
 
     # LLM & Generation Models
-    PRIMARY_LLM: str = "gemini-2.5-flash"
+    PRIMARY_LLM: str = "gemini-3.5-flash-lite"
     CASCADE_MODELS: List[str] = Field(
-        default_factory=lambda: ["gemini-2.5-flash", "gemini-flash-lite-latest", "gemini-flash-latest"]
+        default_factory=lambda: ["gemini-3.5-flash-lite", "gemini-flash-latest", "gemini-3.8-flash", "gemini-2.5-flash"]
     )
     EMBEDDING_MODEL: str = "gemini-embedding-001"
     EMBEDDING_DIM: int = 768

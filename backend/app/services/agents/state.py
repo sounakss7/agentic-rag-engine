@@ -25,6 +25,8 @@ class NexusAgentState(TypedDict):
     # Planning & Decomposition
     hyde_expansion: str
     is_quantitative: bool
+    is_document_summary: Optional[bool]
+    enabled_specialists: Optional[List[str]]
     plan: List[Dict[str, Any]]
     current_step: int
 

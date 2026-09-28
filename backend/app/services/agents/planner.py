@@ -19,7 +19,7 @@ except ImportError:
 
 
 class PlanDecomposition(BaseModel):
-    is_quantitative: bool = Field(description="True if query asks for math, ratios, percentages, growth, or financial calculations")
+    is_quantitative: bool = Field(description="True ONLY if query explicitly asks to compute, calculate, or perform mathematical operations")
     sub_tasks: List[str] = Field(description="List of decomposed sub-questions or focused queries to retrieve complete context")
     hyde_expansion: str = Field(description="Concise hypothetical technical paragraph answering the query directly for vector expansion")
 
@@ -38,11 +38,39 @@ class MasterPlannerAgent:
     def plan_query(self, query: str, chat_history: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
         Decomposes user query and produces an execution roadmap.
+        Includes zero-latency fast-track detection for document summaries.
         """
+        q_lower = query.lower().strip()
+
+        # 1. Fast-track for document summarization or overview requests
+        summary_triggers = [
+            "summary", "summarize", "overview", "what is this document", "what is the document",
+            "from the above document", "from this document", "tell me about the document",
+            "explain the document", "briefly describe the document", "main points"
+        ]
+        is_doc_summary = any(tr in q_lower for tr in summary_triggers)
+        if is_doc_summary:
+            return {
+                "is_quantitative": False,
+                "is_document_summary": True,
+                "sub_tasks": [query, "Document executive summary, introduction, and principal findings"],
+                "hyde_expansion": query,
+            }
+
+        # 2. Strict quantitative calculation check
+        math_triggers = [
+            "calculate", "compute", "difference between", "percentage increase",
+            "growth rate", "sum of", "average of", "ratio of", "multiply", "divide"
+        ]
+        has_math_words = any(m in q_lower for m in math_triggers)
+        has_digits = any(c.isdigit() for c in query)
+        is_strictly_quant = has_math_words and (has_digits or "calculate" in q_lower or "compute" in q_lower)
+
         client = self._get_genai_client()
         if not client:
             return {
-                "is_quantitative": any(w in query.lower() for w in ["calculate", "increase", "%", "percent", "ratio", "revenue", "margin", "growth"]),
+                "is_quantitative": is_strictly_quant,
+                "is_document_summary": False,
                 "sub_tasks": [query],
                 "hyde_expansion": query,
             }
@@ -55,9 +83,9 @@ class MasterPlannerAgent:
         prompt = (
             "You are a Principal AI Research Planner.\n"
             "Analyze the user's question and produce a structured execution plan:\n"
-            "1. Detect if the question requires statistical/financial math (`is_quantitative`).\n"
-            "2. Decompose comparative or multi-part questions into 1-3 targeted sub-queries (`sub_tasks`).\n"
-            "3. Generate a hypothetical factual paragraph directly answering the question (`hyde_expansion`) to maximize vector retrieval recall.\n\n"
+            "1. Detect if the question explicitly requires mathematical calculation (`is_quantitative`). Default to false unless math is explicitly required.\n"
+            "2. Decompose comparative or multi-part questions into 1-2 targeted sub-queries (`sub_tasks`).\n"
+            "3. Generate a hypothetical factual sentence answering the question (`hyde_expansion`) to maximize vector retrieval recall.\n\n"
             f"{history_context}"
             f"User Question: {query}\n"
         )
@@ -69,13 +97,15 @@ class MasterPlannerAgent:
                     contents=prompt,
                     config=types.GenerateContentConfig(
                         response_mime_type="application/json",
-                        response_schema=PlanDecomposition
+                        response_schema=PlanDecomposition,
+                        temperature=0.1
                     ) if types else None
                 )
                 if res and res.text:
                     parsed = json.loads(res.text.strip().replace("```json", "").replace("```", ""))
                     return {
-                        "is_quantitative": bool(parsed.get("is_quantitative", False)),
+                        "is_quantitative": bool(parsed.get("is_quantitative", False)) and is_strictly_quant,
+                        "is_document_summary": False,
                         "sub_tasks": parsed.get("sub_tasks", [query]) or [query],
                         "hyde_expansion": parsed.get("hyde_expansion", query) or query,
                     }
@@ -85,10 +115,10 @@ class MasterPlannerAgent:
                 logger.warning(f"Planner LLM notice: {e}")
                 break
 
-        # Heuristic fallback
-        is_quant = any(w in query.lower() for w in ["calculate", "difference", "%", "percent", "average", "revenue", "sum", "growth"])
+        # Fast heuristic fallback
         return {
-            "is_quantitative": is_quant,
+            "is_quantitative": is_strictly_quant,
+            "is_document_summary": False,
             "sub_tasks": [query],
             "hyde_expansion": query,
         }
